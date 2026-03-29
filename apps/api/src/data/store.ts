@@ -95,7 +95,7 @@ class DataStore {
         id: "int-slack",
         service: "slack",
         name: "Slack",
-        description: "Team communication and notifications",
+        description: "Team or group communication and notifications",
         status: "disconnected",
         capabilities: [
           {

@@ -24,6 +24,16 @@ services/*/*.egg-info/
 services/*/.mypy_cache/
 services/*/.ruff_cache/
 
+# dependencies
+node_modules/
+apps/*/node_modules/
+
+# build outputs
+dist/
+build/
+
+# env
+.env
 # Env files (keep examples)
 .env
 .env.*
