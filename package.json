@@ -1,0 +1,30 @@
+{
+  "name": "nexusmcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agentic MCP Gateway - LLM-powered workflow orchestration",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "clean": "turbo run clean && rm -rf node_modules",
+    "dev:client": "npm run dev -w @nexusmcp/client",
+    "dev:api": "npm run dev -w @nexusmcp/api",
+    "build:packages": "turbo run build --filter=./packages/*",
+    "docker:up": "docker-compose -f infra/docker/docker-compose.yml up -d",
+    "docker:down": "docker-compose -f infra/docker/docker-compose.yml down",
+    "docker:logs": "docker-compose -f infra/docker/docker-compose.yml logs -f"
+  },
+  "devDependencies": {
+    "turbo": "^1.11.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "packageManager": "npm@10.0.0"
+}

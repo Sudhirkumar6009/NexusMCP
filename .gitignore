@@ -1,29 +1,39 @@
-﻿# Monorepo ignores
+# Monorepo ignores
 node_modules/
+.turbo/
 
-# Client artifacts
-client/node_modules/
-client/.next/
-client/out/
-client/build/
-client/.vercel/
-client/*.tsbuildinfo
+# Apps artifacts
+apps/*/node_modules/
+apps/*/.next/
+apps/*/out/
+apps/*/build/
+apps/*/.vercel/
+apps/*/*.tsbuildinfo
+apps/*/dist/
 
-# Server artifacts
-server/node_modules/
-server/dist/
-server/*.tsbuildinfo
+# Packages artifacts
+packages/*/node_modules/
+packages/*/dist/
+packages/*/*.tsbuildinfo
+
+# Python services
+services/*/__pycache__/
+services/*/.venv/
+services/*/.pytest_cache/
+services/*/*.egg-info/
+services/*/.mypy_cache/
+services/*/.ruff_cache/
 
 # Env files (keep examples)
 .env
 .env.*
 !.env.example
-client/.env
-client/.env.*
-!client/.env.example
-server/.env
-server/.env.*
-!server/.env.example
+apps/**/.env
+apps/**/.env.*
+!apps/**/.env.example
+services/**/.env
+services/**/.env.*
+!services/**/.env.example
 
 # Logs and coverage
 *.log
@@ -32,12 +42,24 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 coverage/
+.coverage
+htmlcov/
 
 # OS / Editor
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+*.swp
+*.swo
 
-# Root Next.js cache
+# Docker
+infra/docker/.env
+
+# Database
+infra/db/data/
+
+# Legacy folders (to be removed)
+client/
+server/
 .next/
