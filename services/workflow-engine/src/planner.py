@@ -204,61 +204,101 @@ class WorkflowPlanner:
         )
 
     def _generate_mock_plan(self, prompt: str) -> WorkflowPlan:
-        """Generate a mock plan for testing without LLM"""
+        """Generate a mock plan for testing without LLM - adapts based on query context."""
         prompt_lower = prompt.lower()
         
-        if "bug" in prompt_lower or "jira" in prompt_lower:
-            return WorkflowPlan(
-                prompt=prompt,
-                steps=[
-                    PlanStep(
-                        id="trigger",
-                        tool="jira_get_issue",
-                        service="jira",
-                        description="Get bug details from Jira",
-                        inputs={"issue_id": "{{trigger.issue_id}}"},
-                        outputs=["title", "priority", "reporter"],
-                    ),
-                    PlanStep(
-                        id="create_branch",
-                        tool="github_create_branch",
-                        service="github",
-                        description="Create fix branch",
-                        inputs={"branch": "fix/{{trigger.issue_id}}"},
-                        outputs=["branch_sha", "url"],
-                    ),
-                    PlanStep(
-                        id="notify",
-                        tool="slack_post_message",
-                        service="slack",
-                        description="Notify on-call engineer",
-                        inputs={"text": "New bug: {{trigger.title}}"},
-                        outputs=["msg_ts"],
-                    ),
-                    PlanStep(
-                        id="log",
-                        tool="sheets_append_row",
-                        service="sheets",
-                        description="Log to tracker",
-                        inputs={"row_data": "{{trigger}}"},
-                        outputs=["row_index"],
-                    ),
-                ],
-                parallel_groups=[["trigger"], ["create_branch", "notify", "log"]],
-            )
+        # Identify which services are relevant based on the prompt
+        steps: List[PlanStep] = []
+        parallel_steps: List[str] = []
         
-        # Default plan
+        # Service detection keywords
+        service_keywords = {
+            "jira": ["jira", "issue", "ticket", "bug", "task", "story"],
+            "github": ["github", "repo", "branch", "pr", "pull request", "workflow", "action"],
+            "slack": ["slack", "message", "notify", "channel", "post"],
+            "sheets": ["sheet", "spreadsheet", "log", "record", "append", "row"],
+        }
+        
+        detected_services = set()
+        
+        # Check for "connect all" or "readiness" queries - include all services
+        if any(kw in prompt_lower for kw in ["connect all", "all connector", "readiness", "all service"]):
+            detected_services = {"jira", "github", "slack", "sheets"}
+        else:
+            # Detect specific services mentioned
+            for service, keywords in service_keywords.items():
+                if any(kw in prompt_lower for kw in keywords):
+                    detected_services.add(service)
+        
+        # If no specific service detected, use all available services
+        if not detected_services:
+            detected_services = {"jira", "github", "slack", "sheets"}
+        
+        step_id = 0
+        
+        # Add steps for each detected service
+        if "jira" in detected_services:
+            step_id += 1
+            step_name = f"step_{step_id}"
+            steps.append(
+                PlanStep(
+                    id=step_name,
+                    tool="jira_get_issue" if "get" in prompt_lower or "fetch" in prompt_lower else "jira_create_issue",
+                    service="jira",
+                    description="Jira operation",
+                    inputs={"issue_id": "{{trigger.issue_id}}"} if "get" in prompt_lower else {},
+                    outputs=["title", "priority", "reporter"] if "get" in prompt_lower else ["issue_id", "url"],
+                )
+            )
+            parallel_steps.append(step_name)
+        
+        if "github" in detected_services:
+            step_id += 1
+            step_name = f"step_{step_id}"
+            steps.append(
+                PlanStep(
+                    id=step_name,
+                    tool="github_create_branch",
+                    service="github",
+                    description="GitHub operation",
+                    inputs={"branch": "feature/{{trigger.issue_id}}"},
+                    outputs=["branch_sha", "url"],
+                )
+            )
+            parallel_steps.append(step_name)
+        
+        if "slack" in detected_services:
+            step_id += 1
+            step_name = f"step_{step_id}"
+            steps.append(
+                PlanStep(
+                    id=step_name,
+                    tool="slack_post_message",
+                    service="slack",
+                    description="Slack notification",
+                    inputs={"text": "Workflow triggered"},
+                    outputs=["msg_ts"],
+                )
+            )
+            parallel_steps.append(step_name)
+        
+        if "sheets" in detected_services:
+            step_id += 1
+            step_name = f"step_{step_id}"
+            steps.append(
+                PlanStep(
+                    id=step_name,
+                    tool="sheets_append_row",
+                    service="sheets",
+                    description="Log to spreadsheet",
+                    inputs={"row_data": "{{trigger}}"},
+                    outputs=["row_index"],
+                )
+            )
+            parallel_steps.append(step_name)
+        
         return WorkflowPlan(
             prompt=prompt,
-            steps=[
-                PlanStep(
-                    id="trigger",
-                    tool="jira_get_issue",
-                    service="jira",
-                    description="Workflow trigger",
-                    inputs={},
-                    outputs=["data"],
-                ),
-            ],
-            parallel_groups=[["trigger"]],
+            steps=steps,
+            parallel_groups=[parallel_steps] if parallel_steps else [],
         )

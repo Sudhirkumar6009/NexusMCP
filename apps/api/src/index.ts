@@ -115,6 +115,8 @@ app.get("/api", (_req, res) => {
         "GET /api/workflows": "List all workflows",
         "POST /api/workflows": "Create a new workflow",
         "POST /api/workflows/generate": "Generate workflow from prompt",
+        "POST /api/workflows/agentic-flow":
+          "Generate multi-agent flow plan via Gemini-backed Python service",
       },
       integrations: {
         "GET /api/integrations": "List all integrations",

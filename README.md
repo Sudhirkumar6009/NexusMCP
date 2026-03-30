@@ -4,7 +4,7 @@
 
 **Agentic MCP Orchestration Platform**
 
-*Transform natural language into automated multi-service workflows*
+_Transform natural language into automated multi-service workflows_
 
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://python.org/)
@@ -35,27 +35,27 @@ NexusMCP is a full-stack **AI-powered workflow orchestration platform** that lev
 
 ### Core Capabilities
 
-| Feature | Description |
-|---------|-------------|
-| **Workflow Generation** | Convert prompts like "When a bug is created in Jira, create a GitHub branch and notify Slack" into executable workflows |
-| **Visual DAG Editor** | Interactive node-based workflow builder with real-time execution monitoring |
-| **Multi-Service Orchestration** | Coordinate actions across 7+ integrated services |
-| **Parallel Execution** | Independent nodes execute concurrently with automatic dependency resolution |
-| **Retry & Error Handling** | Configurable retry logic with exponential backoff |
-| **Approval Gates** | Pause workflows for human review before sensitive operations |
-| **Audit Logging** | Comprehensive logging with filtering by level, service, and time |
+| Feature                         | Description                                                                                                             |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| **Workflow Generation**         | Convert prompts like "When a bug is created in Jira, create a GitHub branch and notify Slack" into executable workflows |
+| **Visual DAG Editor**           | Interactive node-based workflow builder with real-time execution monitoring                                             |
+| **Multi-Service Orchestration** | Coordinate actions across 7+ integrated services                                                                        |
+| **Parallel Execution**          | Independent nodes execute concurrently with automatic dependency resolution                                             |
+| **Retry & Error Handling**      | Configurable retry logic with exponential backoff                                                                       |
+| **Approval Gates**              | Pause workflows for human review before sensitive operations                                                            |
+| **Audit Logging**               | Comprehensive logging with filtering by level, service, and time                                                        |
 
 ### Supported Integrations
 
-| Service | Capabilities |
-|---------|-------------|
-| **Jira** | Create, update, and query issues |
-| **Slack** | Send messages, manage channels |
-| **GitHub** | Create issues, PRs, branches |
-| **Google Sheets** | Read and append data |
-| **Gmail** | Send emails via OAuth |
-| **AWS** | STS validation, SigV4 signing |
-| **PostgreSQL** | Query and insert operations |
+| Service           | Capabilities                     |
+| ----------------- | -------------------------------- |
+| **Jira**          | Create, update, and query issues |
+| **Slack**         | Send messages, manage channels   |
+| **GitHub**        | Create issues, PRs, branches     |
+| **Google Sheets** | Read and append data             |
+| **Gmail**         | Send emails via OAuth            |
+| **AWS**           | STS validation, SigV4 signing    |
+| **PostgreSQL**    | Query and insert operations      |
 
 ---
 
@@ -149,42 +149,46 @@ NexusMCP/
 ## Tech Stack
 
 ### Frontend
-| Technology | Version | Purpose |
-|------------|---------|---------|
-| Next.js | 14.2 | React framework with App Router |
-| React | 18.3 | UI library |
-| TypeScript | 5.6 | Type safety |
-| Tailwind CSS | 3.4 | Utility-first styling |
-| Lucide React | 0.453 | Icon library |
+
+| Technology   | Version | Purpose                         |
+| ------------ | ------- | ------------------------------- |
+| Next.js      | 14.2    | React framework with App Router |
+| React        | 18.3    | UI library                      |
+| TypeScript   | 5.6     | Type safety                     |
+| Tailwind CSS | 3.4     | Utility-first styling           |
+| Lucide React | 0.453   | Icon library                    |
 
 ### Backend API
-| Technology | Version | Purpose |
-|------------|---------|---------|
-| Express | 4.21 | Web framework |
-| TypeScript | 5.4 | Type safety |
-| Passport | 0.7 | Authentication strategies |
-| Mongoose | 8.9 | MongoDB ODM |
-| Zod | 3.23 | Schema validation |
-| jsonwebtoken | 9.0 | JWT handling |
+
+| Technology   | Version | Purpose                   |
+| ------------ | ------- | ------------------------- |
+| Express      | 4.21    | Web framework             |
+| TypeScript   | 5.4     | Type safety               |
+| Passport     | 0.7     | Authentication strategies |
+| Mongoose     | 8.9     | MongoDB ODM               |
+| Zod          | 3.23    | Schema validation         |
+| jsonwebtoken | 9.0     | JWT handling              |
 
 ### Python Services
-| Technology | Version | Purpose |
-|------------|---------|---------|
-| FastAPI | 0.109+ | Web framework |
-| Pydantic | 2.5+ | Data validation |
-| httpx | 0.26+ | Async HTTP client |
-| jira | 3.5+ | Jira API client |
-| slack-sdk | 3.26+ | Slack API client |
-| PyGithub | 2.1+ | GitHub API client |
+
+| Technology | Version | Purpose           |
+| ---------- | ------- | ----------------- |
+| FastAPI    | 0.109+  | Web framework     |
+| Pydantic   | 2.5+    | Data validation   |
+| httpx      | 0.26+   | Async HTTP client |
+| jira       | 3.5+    | Jira API client   |
+| slack-sdk  | 3.26+   | Slack API client  |
+| PyGithub   | 2.1+    | GitHub API client |
 
 ### Infrastructure
-| Technology | Version | Purpose |
-|------------|---------|---------|
-| PostgreSQL | 16 | Primary database |
-| MongoDB | - | User authentication |
-| Redis | 7 | Caching & state |
-| Docker | 3.8 | Containerization |
-| Turborepo | 1.11 | Monorepo builds |
+
+| Technology | Version | Purpose             |
+| ---------- | ------- | ------------------- |
+| PostgreSQL | 16      | Primary database    |
+| MongoDB    | -       | User authentication |
+| Redis      | 7       | Caching & state     |
+| Docker     | 3.8     | Containerization    |
+| Turborepo  | 1.11    | Monorepo builds     |
 
 ---
 
@@ -242,7 +246,7 @@ cp apps/client/.env.example apps/client/.env
 ```
 
 ```env
-NEXT_PUBLIC_API_URL=http://localhost:3000
+NEXT_PUBLIC_API_URL=http://localhost:3000/api
 ```
 
 ### Running the Application
@@ -272,14 +276,27 @@ pip install -e .
 python -m uvicorn src.server:app --reload --port 8001
 ```
 
+**Option D: Unified Python Services Environment (Windows PowerShell)**
+
+```bash
+# From repository root
+npm run setup:py-services
+
+# Set GEMINI_API_KEY in services/agentic/.env, then start agentic service
+npm run dev:agentic
+```
+
+This prepares one shared Python virtual environment for all folders under `services/` and runs the Agentic service on port `8010`, which is consumed by backend route `POST /api/workflows/agentic-flow`.
+
 ### Access Points
 
-| Service | URL |
-|---------|-----|
-| Client Dashboard | http://localhost:5000 |
-| API Server | http://localhost:3000 |
-| Health Check | http://localhost:3000/health |
-| MCP Connector | http://localhost:8001 |
+| Service          | URL                          |
+| ---------------- | ---------------------------- |
+| Client Dashboard | http://localhost:5000        |
+| API Server       | http://localhost:3000        |
+| Agentic Service  | http://localhost:8010        |
+| Health Check     | http://localhost:3000/health |
+| MCP Connector    | http://localhost:8001        |
 
 ---
 
@@ -287,59 +304,60 @@ python -m uvicorn src.server:app --reload --port 8001
 
 ### Authentication
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/auth/register` | Register new user |
-| `POST` | `/api/auth/login` | Login with credentials |
-| `GET` | `/api/auth/me` | Get current user |
-| `PUT` | `/api/auth/me` | Update profile |
-| `POST` | `/api/auth/logout` | Logout |
-| `POST` | `/api/auth/gmail/send` | Send email via Gmail |
-| `GET` | `/auth/google` | Initiate Google OAuth |
-| `GET` | `/auth/google/gmail` | Request Gmail scope |
+| Method | Endpoint               | Description            |
+| ------ | ---------------------- | ---------------------- |
+| `POST` | `/api/auth/register`   | Register new user      |
+| `POST` | `/api/auth/login`      | Login with credentials |
+| `GET`  | `/api/auth/me`         | Get current user       |
+| `PUT`  | `/api/auth/me`         | Update profile         |
+| `POST` | `/api/auth/logout`     | Logout                 |
+| `POST` | `/api/auth/gmail/send` | Send email via Gmail   |
+| `GET`  | `/auth/google`         | Initiate Google OAuth  |
+| `GET`  | `/auth/google/gmail`   | Request Gmail scope    |
 
 ### Workflows
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/workflows` | List all workflows |
-| `GET` | `/api/workflows/:id` | Get single workflow |
-| `POST` | `/api/workflows` | Create workflow |
-| `PUT` | `/api/workflows/:id` | Update workflow |
-| `DELETE` | `/api/workflows/:id` | Delete workflow |
-| `POST` | `/api/workflows/:id/execute` | Execute workflow |
-| `POST` | `/api/workflows/:id/pause` | Pause execution |
-| `POST` | `/api/workflows/:id/resume` | Resume execution |
-| `POST` | `/api/workflows/:id/stop` | Stop execution |
-| `POST` | `/api/workflows/generate` | Generate from prompt |
+| Method   | Endpoint                      | Description                              |
+| -------- | ----------------------------- | ---------------------------------------- |
+| `GET`    | `/api/workflows`              | List all workflows                       |
+| `GET`    | `/api/workflows/:id`          | Get single workflow                      |
+| `POST`   | `/api/workflows`              | Create workflow                          |
+| `PUT`    | `/api/workflows/:id`          | Update workflow                          |
+| `DELETE` | `/api/workflows/:id`          | Delete workflow                          |
+| `POST`   | `/api/workflows/:id/execute`  | Execute workflow                         |
+| `POST`   | `/api/workflows/:id/pause`    | Pause execution                          |
+| `POST`   | `/api/workflows/:id/resume`   | Resume execution                         |
+| `POST`   | `/api/workflows/:id/stop`     | Stop execution                           |
+| `POST`   | `/api/workflows/generate`     | Generate from prompt                     |
+| `POST`   | `/api/workflows/agentic-flow` | Generate Gemini-backed agentic flow plan |
 
 ### Integrations
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/integrations` | List all integrations |
-| `POST` | `/api/integrations/:id/connect` | Connect with validation |
-| `POST` | `/api/integrations/:id/disconnect` | Disconnect integration |
-| `POST` | `/api/integrations/:id/test` | Test connection |
-| `GET` | `/api/integrations/:id/capabilities` | Get capabilities |
+| Method | Endpoint                             | Description             |
+| ------ | ------------------------------------ | ----------------------- |
+| `GET`  | `/api/integrations`                  | List all integrations   |
+| `POST` | `/api/integrations/:id/connect`      | Connect with validation |
+| `POST` | `/api/integrations/:id/disconnect`   | Disconnect integration  |
+| `POST` | `/api/integrations/:id/test`         | Test connection         |
+| `GET`  | `/api/integrations/:id/capabilities` | Get capabilities        |
 
 ### MCP Execution
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/mcp/execute` | Execute MCP request |
-| `POST` | `/api/mcp/execute-node` | Execute workflow node |
-| `GET` | `/api/mcp/methods` | List available methods |
-| `POST` | `/api/mcp/batch` | Batch MCP requests |
-| `POST` | `/api/mcp/stream` | Stream execution |
+| Method | Endpoint                | Description            |
+| ------ | ----------------------- | ---------------------- |
+| `POST` | `/api/mcp/execute`      | Execute MCP request    |
+| `POST` | `/api/mcp/execute-node` | Execute workflow node  |
+| `GET`  | `/api/mcp/methods`      | List available methods |
+| `POST` | `/api/mcp/batch`        | Batch MCP requests     |
+| `POST` | `/api/mcp/stream`       | Stream execution       |
 
 ### System
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/logs` | Query audit logs |
-| `GET` | `/api/settings` | Get app settings |
-| `PUT` | `/api/settings` | Update settings |
+| Method | Endpoint        | Description      |
+| ------ | --------------- | ---------------- |
+| `GET`  | `/api/logs`     | Query audit logs |
+| `GET`  | `/api/settings` | Get app settings |
+| `PUT`  | `/api/settings` | Update settings  |
 
 ---
 
@@ -388,16 +406,16 @@ npm run docker:down
 
 ### Services
 
-| Container | Port | Description |
-|-----------|------|-------------|
-| nexusmcp-client | 5000 | Next.js frontend |
-| nexusmcp-api | 3000 | Express API |
-| nexusmcp-postgres | 5432 | PostgreSQL database |
-| nexusmcp-redis | 6379 | Redis cache |
-| nexusmcp-agent-runtime | 8001 | DAG executor |
-| nexusmcp-workflow-engine | 8002 | LLM planner |
-| nexusmcp-mcp-connectors | 8003 | Connector gateway |
-| nexusmcp-context-manager | 8004 | State manager |
+| Container                | Port | Description         |
+| ------------------------ | ---- | ------------------- |
+| nexusmcp-client          | 5000 | Next.js frontend    |
+| nexusmcp-api             | 3000 | Express API         |
+| nexusmcp-postgres        | 5432 | PostgreSQL database |
+| nexusmcp-redis           | 6379 | Redis cache         |
+| nexusmcp-agent-runtime   | 8001 | DAG executor        |
+| nexusmcp-workflow-engine | 8002 | LLM planner         |
+| nexusmcp-mcp-connectors  | 8003 | Connector gateway   |
+| nexusmcp-context-manager | 8004 | State manager       |
 
 ---
 
@@ -445,21 +463,26 @@ ruff check src/
 ### Common Issues
 
 **Google OAuth "access_denied" in test mode**
+
 - Add your Google account under OAuth consent screen > Test users in Google Cloud Console
 
 **"redirect_uri_mismatch" error**
+
 - Ensure `GOOGLE_CALLBACK_URL` exactly matches the URI in Google credentials
 - Default: `http://localhost:3000/auth/google/callback`
 
 **CORS errors**
+
 - Verify `CLIENT_URL` in API `.env` matches your client origin
 - Default: `http://localhost:5000`
 
 **Port already in use**
+
 - Kill existing processes: `lsof -ti:3000 | xargs kill` (Unix) or use Task Manager (Windows)
 - Or change ports in respective `.env` files
 
 **MongoDB connection failed**
+
 - Verify `MONGODB_URI` connection string
 - Check IP whitelist in MongoDB Atlas
 

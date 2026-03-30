@@ -2,6 +2,11 @@
  * API Client for NexusMCP Backend
  */
 
+import type {
+  AgentFlowPlan,
+  AgentFlowRequestPayload,
+} from "@/types/agentic-flow";
+
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000/api";
 
@@ -107,6 +112,26 @@ export const workflowsApi = {
     fetchApi<Workflow>("/workflows/generate", {
       method: "POST",
       body: JSON.stringify({ prompt }),
+    }),
+
+  generateAgenticFlow: (
+    payload: AgentFlowRequestPayload,
+    signal?: AbortSignal,
+  ) =>
+    fetchApi<AgentFlowPlan>("/workflows/agentic-flow", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      signal,
+    }),
+
+  smartExecute: (
+    payload: SmartExecutionPayload,
+    signal?: AbortSignal,
+  ) =>
+    fetchApi<SmartExecutionResult>("/workflows/smart-execute", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      signal,
     }),
 };
 
@@ -237,10 +262,12 @@ export const mcpApi = {
 };
 
 // Type definitions (shared with server)
+type ServiceType = "jira" | "slack" | "github" | "postgres" | "sheets" | "google_sheets" | "gmail" | "aws";
+
 interface DAGNode {
   id: string;
   type: "trigger" | "action" | "condition" | "output";
-  service: "jira" | "slack" | "github" | "postgres";
+  service: ServiceType;
   operation: string;
   label: string;
   config: Record<string, unknown>;
@@ -298,7 +325,7 @@ interface NodeExecutionResult {
 
 interface Integration {
   id: string;
-  service: "jira" | "slack" | "github" | "postgres";
+  service: ServiceType;
   name: string;
   description: string;
   status: "connected" | "disconnected" | "error";
@@ -320,7 +347,7 @@ interface AuditLog {
   id: string;
   timestamp: string;
   level: "info" | "warning" | "error" | "debug";
-  service: "jira" | "slack" | "github" | "postgres" | "system";
+  service: ServiceType | "system";
   action: string;
   message: string;
   details?: Record<string, unknown>;
@@ -437,4 +464,88 @@ export type {
   ExecutionSettings,
   NotificationSettings,
   MCPResponse,
+  ServiceType,
+  SmartExecutionPayload,
+  SmartExecutionResult,
+  SmartExecutionStep,
+  SmartExecutionLog,
 };
+
+// ============================================================================
+// Smart Execution Types
+// ============================================================================
+
+interface SmartExecutionPayload {
+  prompt: string;
+  integrations?: Array<{
+    id: string;
+    name: string;
+    status: "connected" | "disconnected" | "error" | "pending";
+    enabled: boolean;
+    tools: string[];
+  }>;
+  availableTools?: Record<
+    string,
+    {
+      description: string;
+      inputs: Record<string, string>;
+    }
+  >;
+  execute?: boolean;
+}
+
+interface SmartExecutionStep {
+  id: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+  dependsOn: string[];
+  description: string;
+  status: "pending" | "running" | "done" | "failed" | "skipped";
+  result?: unknown;
+  error?: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+interface SmartExecutionLog {
+  timestamp: string;
+  level: "debug" | "info" | "warn" | "error";
+  stage: "planning" | "execution" | "completion";
+  stepId?: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+interface SmartExecutionResult {
+  id: string;
+  prompt: string;
+  createdAt: string;
+  plan: {
+    steps: SmartExecutionStep[];
+    workflowType: "sequential" | "parallel" | "mixed";
+    summary: string;
+    extractedParams: Record<string, string>;
+  };
+  logs: SmartExecutionLog[];
+  overallStatus: "planned" | "running" | "completed" | "partial" | "failed";
+  flowSteps: Array<{
+    id: string;
+    label: string;
+    description: string;
+    phase: string;
+    level: number;
+    serviceId?: string;
+    serviceName?: string;
+    status: string;
+    tool?: string;
+    arguments?: Record<string, unknown>;
+  }>;
+  flowEdges: Array<{
+    id: string;
+    source: string;
+    target: string;
+  }>;
+  results: Record<string, unknown>;
+  startedAt?: string;
+  completedAt?: string;
+}

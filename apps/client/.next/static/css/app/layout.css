@@ -813,6 +813,9 @@ body{
 .hidden{
   display: none;
 }
+.\!h-3{
+  height: 0.75rem !important;
+}
 .h-1\.5{
   height: 0.375rem;
 }
@@ -830,6 +833,9 @@ body{
 }
 .h-2{
   height: 0.5rem;
+}
+.h-2\.5{
+  height: 0.625rem;
 }
 .h-20{
   height: 5rem;
@@ -864,6 +870,9 @@ body{
 .h-\[500px\]{
   height: 500px;
 }
+.h-\[560px\]{
+  height: 560px;
+}
 .h-full{
   height: 100%;
 }
@@ -879,8 +888,14 @@ body{
 .max-h-20{
   max-height: 5rem;
 }
+.max-h-40{
+  max-height: 10rem;
+}
 .max-h-48{
   max-height: 12rem;
+}
+.max-h-64{
+  max-height: 16rem;
 }
 .max-h-80{
   max-height: 20rem;
@@ -897,8 +912,14 @@ body{
 .min-h-\[120px\]{
   min-height: 120px;
 }
+.min-h-\[96px\]{
+  min-height: 96px;
+}
 .min-h-screen{
   min-height: 100vh;
+}
+.\!w-3{
+  width: 0.75rem !important;
 }
 .w-1\.5{
   width: 0.375rem;
@@ -923,6 +944,9 @@ body{
 }
 .w-2{
   width: 0.5rem;
+}
+.w-2\.5{
+  width: 0.625rem;
 }
 .w-20{
   width: 5rem;
@@ -971,6 +995,9 @@ body{
 }
 .w-9{
   width: 2.25rem;
+}
+.w-\[260px\]{
+  width: 260px;
 }
 .w-\[500px\]{
   width: 500px;
@@ -1070,6 +1097,9 @@ body{
 .animate-spin{
   animation: spin 1s linear infinite;
 }
+.\!cursor-crosshair{
+  cursor: crosshair !important;
+}
 .cursor-default{
   cursor: default;
 }
@@ -1127,6 +1157,9 @@ body{
 }
 .items-center{
   align-items: center;
+}
+.items-stretch{
+  align-items: stretch;
 }
 .justify-end{
   justify-content: flex-end;
@@ -1214,6 +1247,9 @@ body{
 .break-words{
   overflow-wrap: break-word;
 }
+.\!rounded-full{
+  border-radius: 9999px !important;
+}
 .rounded{
   border-radius: 0.25rem;
 }
@@ -1238,6 +1274,9 @@ body{
 .rounded-xl{
   border-radius: 0.75rem;
 }
+.\!border-2{
+  border-width: 2px !important;
+}
 .border{
   border-width: 1px;
 }
@@ -1261,6 +1300,9 @@ body{
 }
 .border-dashed{
   border-style: dashed;
+}
+.\!border-surface-primary{
+  border-color: var(--bg-primary) !important;
 }
 .border-\[\#0F6E56\]{
   --tw-border-opacity: 1;
@@ -1310,12 +1352,24 @@ body{
   --tw-border-opacity: 1;
   border-color: rgb(59 130 246 / var(--tw-border-opacity, 1));
 }
+.border-info\/30{
+  border-color: rgb(59 130 246 / 0.3);
+}
+.border-info\/40{
+  border-color: rgb(59 130 246 / 0.4);
+}
 .border-primary{
   --tw-border-opacity: 1;
   border-color: rgb(102 102 255 / var(--tw-border-opacity, 1));
 }
 .border-primary\/30{
   border-color: rgb(102 102 255 / 0.3);
+}
+.border-primary\/35{
+  border-color: rgb(102 102 255 / 0.35);
+}
+.border-primary\/40{
+  border-color: rgb(102 102 255 / 0.4);
 }
 .border-red-500\/30{
   border-color: rgb(239 68 68 / 0.3);
@@ -1327,9 +1381,18 @@ body{
 .border-success\/30{
   border-color: rgb(34 197 94 / 0.3);
 }
+.border-success\/35{
+  border-color: rgb(34 197 94 / 0.35);
+}
 .border-warning{
   --tw-border-opacity: 1;
   border-color: rgb(245 158 11 / var(--tw-border-opacity, 1));
+}
+.border-warning\/35{
+  border-color: rgb(245 158 11 / 0.35);
+}
+.border-warning\/40{
+  border-color: rgb(245 158 11 / 0.4);
 }
 .border-white{
   --tw-border-opacity: 1;
@@ -1375,6 +1438,14 @@ body{
 }
 .border-t-transparent{
   border-top-color: transparent;
+}
+.\!bg-info{
+  --tw-bg-opacity: 1 !important;
+  background-color: rgb(59 130 246 / var(--tw-bg-opacity, 1)) !important;
+}
+.\!bg-primary{
+  --tw-bg-opacity: 1 !important;
+  background-color: rgb(102 102 255 / var(--tw-bg-opacity, 1)) !important;
 }
 .bg-\[\#064034\]{
   --tw-bg-opacity: 1;
@@ -1568,6 +1639,10 @@ body{
   padding-left: 0.5rem;
   padding-right: 0.5rem;
 }
+.px-2\.5{
+  padding-left: 0.625rem;
+  padding-right: 0.625rem;
+}
 .px-3{
   padding-left: 0.75rem;
   padding-right: 0.75rem;
@@ -1666,6 +1741,9 @@ body{
 .pl-64{
   padding-left: 16rem;
 }
+.pr-1{
+  padding-right: 0.25rem;
+}
 .pr-10{
   padding-right: 2.5rem;
 }
@@ -1726,6 +1804,9 @@ body{
 }
 .text-\[10px\]{
   font-size: 10px;
+}
+.text-\[11px\]{
+  font-size: 11px;
 }
 .text-\[13px\]{
   font-size: 13px;
@@ -1794,6 +1875,9 @@ body{
 }
 .tracking-\[\.08em\]{
   letter-spacing: .08em;
+}
+.tracking-wide{
+  letter-spacing: 0.025em;
 }
 .tracking-wider{
   letter-spacing: 0.05em;
@@ -2202,8 +2286,20 @@ body{
     width: auto;
   }
 
+  .sm\:grid-cols-2{
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .sm\:flex-row{
     flex-direction: row;
+  }
+
+  .sm\:flex-wrap{
+    flex-wrap: wrap;
+  }
+
+  .sm\:items-center{
+    align-items: center;
   }
 }
 
@@ -2260,6 +2356,13 @@ body{
 
   .lg\:p-12{
     padding: 3rem;
+  }
+}
+
+@media (min-width: 1280px){
+
+  .xl\:grid-cols-3{
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 

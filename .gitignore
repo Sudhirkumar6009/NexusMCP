@@ -70,6 +70,6 @@ infra/docker/.env
 infra/db/data/
 
 # Legacy folders (to be removed)
-client/
-server/
+/client/
+/server/
 .next/
