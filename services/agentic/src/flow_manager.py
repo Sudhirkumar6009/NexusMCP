@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from typing import Any, Dict, List, Optional
 import logging
+import re
 
 from .agents.connector_agent import ConnectorAgent
 from .agents.context_agent import ContextAnalysisAgent
@@ -155,6 +156,167 @@ class FlowManager:
             if key in allowed_inputs
         }
 
+    @staticmethod
+    def _is_jira_update_operation(operation: str) -> bool:
+        normalized = operation.strip().lower().replace("-", "_")
+        return normalized in {"update_issue", "transition_issue"}
+
+    @staticmethod
+    def _has_valid_jira_update_arguments(arguments: Dict[str, Any]) -> bool:
+        issue_key = ""
+        for key, value in arguments.items():
+            if "issue" in key.lower() and isinstance(value, str) and value.strip():
+                issue_key = value.strip()
+                break
+
+        if not issue_key:
+            return False
+
+        fields_value = arguments.get("fields")
+        has_fields = isinstance(fields_value, dict) and len(fields_value) > 0
+        if has_fields:
+            return True
+
+        for key, value in arguments.items():
+            lowered = key.lower()
+            if lowered in {"status", "state", "transition_id", "transitionid"}:
+                if isinstance(value, str) and value.strip():
+                    return True
+
+        return False
+
+    @staticmethod
+    def _is_valid_branch_candidate(candidate: str) -> bool:
+        invalid_tokens = {
+            "and",
+            "or",
+            "for",
+            "with",
+            "from",
+            "to",
+            "pr",
+            "pull",
+            "request",
+            "in",
+            "on",
+        }
+        return bool(candidate and candidate.lower() not in invalid_tokens)
+
+    def _extract_prompt_params(self, prompt: str) -> Dict[str, str]:
+        extracted: Dict[str, str] = {}
+
+        issue_match = re.search(r"\b([A-Z][A-Z0-9]+-\d+)\b", prompt)
+        if issue_match:
+            extracted["issue_key"] = issue_match.group(1)
+
+        repo_patterns = [
+            r"\brepo(?:sitory)?\s+([a-zA-Z0-9._/-]+)\b",
+            r"\bin\s+repo(?:sitory)?\s+([a-zA-Z0-9._/-]+)\b",
+            r"\bin\s+([a-zA-Z0-9._/-]+)\s+repo(?:sitory)?\b",
+        ]
+        for pattern in repo_patterns:
+            repo_match = re.search(pattern, prompt, re.IGNORECASE)
+            if repo_match:
+                extracted["repo"] = repo_match.group(1)
+                break
+
+        branch_match = re.search(
+            r"\b(?:branch(?:\s+name)?|head)\s+([a-zA-Z0-9._/-]+)\b",
+            prompt,
+            re.IGNORECASE,
+        )
+        if branch_match:
+            branch_candidate = branch_match.group(1)
+            if self._is_valid_branch_candidate(branch_candidate):
+                extracted["branch_name"] = branch_candidate
+
+        if extracted.get("issue_key") and "branch_name" not in extracted:
+            extracted["branch_name"] = f"feature/{extracted['issue_key']}"
+
+        return extracted
+
+    def _apply_prompt_overrides(
+        self,
+        service_id: str,
+        operation: str,
+        arguments: Dict[str, Any],
+        prompt_params: Dict[str, str],
+    ) -> Dict[str, Any]:
+        normalized_arguments = dict(arguments or {})
+
+        prompt_issue_key = prompt_params.get("issue_key")
+        prompt_repo = prompt_params.get("repo")
+        prompt_branch = prompt_params.get("branch_name")
+        normalized_operation = operation.strip().lower().replace("-", "_")
+
+        if prompt_issue_key:
+            issue_keys = [key for key in normalized_arguments if "issue" in key.lower()]
+            for key in issue_keys:
+                normalized_arguments[key] = prompt_issue_key
+
+            if service_id == "jira" and not issue_keys:
+                normalized_arguments["issue_key"] = prompt_issue_key
+
+        if prompt_repo:
+            repo_keys = [
+                key
+                for key in normalized_arguments
+                if key.lower() in {"repo", "repository", "repo_name", "repository_name"}
+            ]
+            for key in repo_keys:
+                normalized_arguments[key] = prompt_repo
+
+            if service_id == "github" and not repo_keys:
+                normalized_arguments["repo"] = prompt_repo
+
+        if service_id == "github":
+            effective_branch = prompt_branch or (
+                f"feature/{prompt_issue_key}" if prompt_issue_key else ""
+            )
+
+            if normalized_operation in {"create_branch", "create_pull_request", "create_pr"} and effective_branch:
+                branch_keys = [
+                    key
+                    for key in normalized_arguments
+                    if key.lower() in {"branch", "branch_name", "head"}
+                ]
+                for key in branch_keys:
+                    normalized_arguments[key] = effective_branch
+
+                if normalized_operation == "create_branch" and not any(
+                    key.lower() in {"branch", "branch_name"}
+                    for key in normalized_arguments
+                ):
+                    normalized_arguments["branch_name"] = effective_branch
+
+                if normalized_operation in {"create_pull_request", "create_pr"} and "head" not in {
+                    key.lower() for key in normalized_arguments
+                }:
+                    normalized_arguments["head"] = effective_branch
+
+            if prompt_issue_key and normalized_operation in {"create_pull_request", "create_pr"}:
+                title_key = next(
+                    (key for key in normalized_arguments if key.lower() == "title"),
+                    None,
+                )
+                if title_key:
+                    current_title = str(normalized_arguments.get(title_key) or "")
+                    if prompt_issue_key not in current_title:
+                        normalized_arguments[title_key] = f"Fix {prompt_issue_key}"
+                else:
+                    normalized_arguments["title"] = f"Fix {prompt_issue_key}"
+
+                body_key = next(
+                    (key for key in normalized_arguments if key.lower() == "body"),
+                    None,
+                )
+                if body_key:
+                    current_body = str(normalized_arguments.get(body_key) or "")
+                    if not current_body.strip():
+                        normalized_arguments[body_key] = f"Fixes {prompt_issue_key}"
+
+        return normalized_arguments
+
     def _resolve_dependencies(
         self,
         dependencies: List[str],
@@ -190,6 +352,7 @@ class FlowManager:
         workflow_plan: Any,
         get_tool_name: Any,
         available_tools: Dict[str, ToolDefinition],
+        prompt_params: Dict[str, str],
     ) -> int:
         local_index_to_step_id: Dict[str, str] = {}
         operation_to_step_id: Dict[str, str] = {}
@@ -216,15 +379,28 @@ class FlowManager:
             if not tool_name:
                 continue
 
+            prompt_overridden_arguments = self._apply_prompt_overrides(
+                service_id=service_id,
+                operation=operation.operation,
+                arguments=operation.arguments,
+                prompt_params=prompt_params,
+            )
+
+            sanitized_arguments = self._sanitize_tool_arguments(
+                tool_name,
+                prompt_overridden_arguments,
+                available_tools,
+            )
+
+            if service_id == "jira" and self._is_jira_update_operation(operation.operation):
+                if not self._has_valid_jira_update_arguments(sanitized_arguments):
+                    continue
+
             target_steps.append(
                 ToolPlanStep(
                     id=step_id,
                     tool=tool_name,
-                    arguments=self._sanitize_tool_arguments(
-                        tool_name,
-                        operation.arguments,
-                        available_tools,
-                    ),
+                    arguments=sanitized_arguments,
                 )
             )
 
@@ -234,6 +410,227 @@ class FlowManager:
             next_step_id += 1
 
         return next_step_id
+
+    @staticmethod
+    def _tool_signature(tool_name: str) -> str:
+        return tool_name.lower().replace("_", "").replace(".", "")
+
+    def _is_pr_tool_name(self, tool_name: str) -> bool:
+        signature = self._tool_signature(tool_name)
+        return "createpullrequest" in signature or signature.endswith("createpr")
+
+    def _is_branch_tool_name(self, tool_name: str) -> bool:
+        return "createbranch" in self._tool_signature(tool_name)
+
+    def _is_commit_tool_name(self, tool_name: str) -> bool:
+        signature = self._tool_signature(tool_name)
+        return (
+            "createorupdatefile" in signature
+            or signature.endswith("createfile")
+            or signature.endswith("updatefile")
+            or "commitfile" in signature
+        )
+
+    def _find_preferred_tool_name(
+        self,
+        available_tools: Dict[str, ToolDefinition],
+        preferred_names: List[str],
+        predicate,
+    ) -> str | None:
+        for tool_name in preferred_names:
+            if tool_name in available_tools:
+                return tool_name
+
+        for tool_name in available_tools:
+            if predicate(tool_name):
+                return tool_name
+
+        return None
+
+    def _build_branch_step_arguments(
+        self,
+        definition: ToolDefinition,
+        repo: str,
+        branch_name: str,
+    ) -> Dict[str, Any]:
+        arguments: Dict[str, Any] = {}
+        for input_name in definition.inputs:
+            lowered = input_name.lower()
+            if lowered in {"repo", "repository", "repo_name", "repository_name"} and repo:
+                arguments[input_name] = repo
+            elif lowered in {"branch", "branch_name", "head"}:
+                arguments[input_name] = branch_name
+            elif lowered in {"base", "base_branch", "target_branch"}:
+                arguments[input_name] = "main"
+        return arguments
+
+    def _build_commit_step_arguments(
+        self,
+        definition: ToolDefinition,
+        repo: str,
+        branch_name: str,
+        issue_key: str,
+    ) -> Dict[str, Any]:
+        file_path = f"{issue_key}.txt" if issue_key else "AUTOMATION_CHANGE.txt"
+        content = f"Fix for {issue_key}" if issue_key else "Automated change from NexusMCP"
+        message = f"Fix {issue_key}" if issue_key else "Automated update"
+
+        arguments: Dict[str, Any] = {}
+        for input_name in definition.inputs:
+            lowered = input_name.lower()
+            if lowered in {"repo", "repository", "repo_name", "repository_name"} and repo:
+                arguments[input_name] = repo
+            elif lowered in {"branch", "branch_name", "head"}:
+                arguments[input_name] = branch_name
+            elif lowered in {"path", "file", "file_path", "filename"}:
+                arguments[input_name] = file_path
+            elif lowered in {"content", "text", "file_content", "body"}:
+                arguments[input_name] = content
+            elif lowered in {"message", "commit_message", "commitmessage", "title"}:
+                arguments[input_name] = message
+        return arguments
+
+    def _ensure_github_commit_before_pr(
+        self,
+        plan: ToolExecutionPlan,
+        available_tools: Dict[str, ToolDefinition],
+        prompt_params: Dict[str, str],
+    ) -> ToolExecutionPlan:
+        steps = list(plan.steps)
+        pr_index = next(
+            (index for index, step in enumerate(steps) if self._is_pr_tool_name(step.tool)),
+            None,
+        )
+        if pr_index is None:
+            return plan
+
+        commit_tool_name = self._find_preferred_tool_name(
+            available_tools,
+            [
+                "github.create_or_update_file",
+                "github_create_or_update_file",
+                "github.createOrUpdateFile",
+                "github.create_file",
+                "github_create_file",
+                "github.update_file",
+                "github_update_file",
+            ],
+            self._is_commit_tool_name,
+        )
+        if not commit_tool_name:
+            return plan
+
+        issue_key = prompt_params.get("issue_key", "")
+        repo = prompt_params.get("repo", "")
+        branch_name = prompt_params.get("branch_name", "")
+
+        pr_arguments = steps[pr_index].arguments
+        if not repo:
+            repo = str(
+                pr_arguments.get("repo")
+                or pr_arguments.get("repository")
+                or pr_arguments.get("repo_name")
+                or ""
+            )
+
+        if not branch_name:
+            branch_name = str(
+                pr_arguments.get("head")
+                or pr_arguments.get("branch")
+                or pr_arguments.get("branch_name")
+                or ""
+            )
+
+        if not branch_name and issue_key:
+            branch_name = f"feature/{issue_key}"
+        if not branch_name:
+            branch_name = "feature/automation"
+
+        branch_index = next(
+            (index for index, step in enumerate(steps) if self._is_branch_tool_name(step.tool)),
+            None,
+        )
+
+        if branch_index is None:
+            branch_tool_name = self._find_preferred_tool_name(
+                available_tools,
+                [
+                    "github.create_branch",
+                    "github_create_branch",
+                    "github.createBranch",
+                ],
+                self._is_branch_tool_name,
+            )
+            if branch_tool_name:
+                branch_arguments = self._build_branch_step_arguments(
+                    available_tools[branch_tool_name],
+                    repo,
+                    branch_name,
+                )
+                steps.insert(
+                    pr_index,
+                    ToolPlanStep(
+                        id="",
+                        tool=branch_tool_name,
+                        arguments=branch_arguments,
+                    ),
+                )
+                pr_index += 1
+
+        commit_index = next(
+            (index for index, step in enumerate(steps) if self._is_commit_tool_name(step.tool)),
+            None,
+        )
+
+        if commit_index is None:
+            commit_arguments = self._build_commit_step_arguments(
+                available_tools[commit_tool_name],
+                repo,
+                branch_name,
+                issue_key,
+            )
+            steps.insert(
+                pr_index,
+                ToolPlanStep(
+                    id="",
+                    tool=commit_tool_name,
+                    arguments=commit_arguments,
+                ),
+            )
+        else:
+            commit_step = steps[commit_index]
+            commit_definition = available_tools.get(commit_step.tool)
+            if commit_definition:
+                defaults = self._build_commit_step_arguments(
+                    commit_definition,
+                    repo,
+                    branch_name,
+                    issue_key,
+                )
+                merged_arguments = dict(commit_step.arguments)
+                for key, value in defaults.items():
+                    if key not in merged_arguments or not merged_arguments.get(key):
+                        merged_arguments[key] = value
+                steps[commit_index] = ToolPlanStep(
+                    id=commit_step.id,
+                    tool=commit_step.tool,
+                    arguments=merged_arguments,
+                )
+
+            if commit_index > pr_index:
+                moved_commit = steps.pop(commit_index)
+                steps.insert(pr_index, moved_commit)
+
+        return ToolExecutionPlan(
+            steps=[
+                ToolPlanStep(
+                    id=str(index),
+                    tool=step.tool,
+                    arguments=step.arguments,
+                )
+                for index, step in enumerate(steps, start=1)
+            ]
+        )
 
     async def _build_specialized_execution_plan(
         self,
@@ -255,10 +652,13 @@ class FlowManager:
             seen_services.add(canonical)
             ordered_services.append(canonical)
 
+        prompt_params = self._extract_prompt_params(prompt)
+
         shared_context: Dict[str, Any] = {
             "intent": context.intent,
             "summary": context.summary,
             **required_api.extracted_params,
+            **prompt_params,
         }
 
         plan_steps: List[ToolPlanStep] = []
@@ -278,8 +678,10 @@ class FlowManager:
                     jira_plan,
                     self.jira_agent.get_tool_name,
                     available_tools,
+                    prompt_params,
                 )
                 shared_context.update(jira_plan.extracted_params)
+                shared_context.update(prompt_params)
                 continue
 
             if canonical_service == "github":
@@ -295,8 +697,10 @@ class FlowManager:
                     github_plan,
                     self.github_agent.get_tool_name,
                     available_tools,
+                    prompt_params,
                 )
                 shared_context.update(github_plan.extracted_params)
+                shared_context.update(prompt_params)
                 continue
 
             if canonical_service == "slack":
@@ -312,8 +716,10 @@ class FlowManager:
                     slack_plan,
                     self.slack_agent.get_tool_name,
                     available_tools,
+                    prompt_params,
                 )
                 shared_context.update(slack_plan.extracted_params)
+                shared_context.update(prompt_params)
                 continue
 
             if canonical_service == "google_sheets":
@@ -329,8 +735,10 @@ class FlowManager:
                     sheets_plan,
                     self.sheets_agent.get_tool_name,
                     available_tools,
+                    prompt_params,
                 )
                 shared_context.update(sheets_plan.extracted_params)
+                shared_context.update(prompt_params)
                 continue
 
             if canonical_service == "gmail":
@@ -346,8 +754,10 @@ class FlowManager:
                     gmail_plan,
                     self.gmail_agent.get_tool_name,
                     available_tools,
+                    prompt_params,
                 )
                 shared_context.update(gmail_plan.extracted_params)
+                shared_context.update(prompt_params)
 
         return ToolExecutionPlan(steps=plan_steps)
 
@@ -412,13 +822,18 @@ class FlowManager:
 
             # Step 4: Generate full flow (all services ready)
             # Filter integrations to only include required ones
-            required_ids = {
-                self._normalize_service_id(s.service_id)
-                for s in required_api.required_services
-            }
+            required_ids_in_order: List[str] = []
+            required_ids_set: set[str] = set()
+            for service in required_api.required_services:
+                normalized_service_id = self._normalize_service_id(service.service_id)
+                if normalized_service_id in required_ids_set:
+                    continue
+                required_ids_set.add(normalized_service_id)
+                required_ids_in_order.append(normalized_service_id)
+
             filtered_integrations = [
                 i for i in request.integrations 
-                if self._normalize_service_id(i.id) in required_ids
+                if self._normalize_service_id(i.id) in required_ids_set
             ]
 
             # Fallback to context-selected services only (never arbitrary connected services).
@@ -441,7 +856,7 @@ class FlowManager:
 
             target_service_ids: List[str] = []
             seen_target_ids: set[str] = set()
-            for raw_service_id in [*list(required_ids), *context.target_service_ids]:
+            for raw_service_id in [*required_ids_in_order, *context.target_service_ids]:
                 canonical_service_id = self._canonical_service_id(raw_service_id)
                 if canonical_service_id in seen_target_ids:
                     continue
@@ -463,11 +878,23 @@ class FlowManager:
                 required_api=required_api,
             )
 
+            prompt_params = self._extract_prompt_params(request.prompt)
+            execution_plan = self._ensure_github_commit_before_pr(
+                execution_plan,
+                tool_selection.available_tools,
+                prompt_params,
+            )
+
             if not execution_plan.steps:
                 execution_plan = await self.tool_planner_agent.run(
                     prompt=request.prompt,
                     available_tools=tool_selection.available_tools,
                     selected_tools=tool_selection.selected_tools,
+                )
+                execution_plan = self._ensure_github_commit_before_pr(
+                    execution_plan,
+                    tool_selection.available_tools,
+                    prompt_params,
                 )
 
             validated_plan = self.json_guard_agent.run(
@@ -687,6 +1114,11 @@ class FlowManager:
             prompt=request.prompt,
             available_tools=tool_selection.available_tools,
             selected_tools=tool_selection.selected_tools,
+        )
+        execution_plan = self._ensure_github_commit_before_pr(
+            execution_plan,
+            tool_selection.available_tools,
+            self._extract_prompt_params(request.prompt),
         )
         validated_execution_plan = self.json_guard_agent.run(
             execution_plan,

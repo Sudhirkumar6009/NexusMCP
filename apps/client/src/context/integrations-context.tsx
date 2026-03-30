@@ -134,6 +134,12 @@ const initialIntegrations: Integration[] = [
         requiresApproval: true,
       },
       {
+        name: "create_or_update_file",
+        description: "Create or update a file in a branch (creates a commit)",
+        inputSchema: {},
+        requiresApproval: true,
+      },
+      {
         name: "merge_pr",
         description: "Merge a pull request",
         inputSchema: {},

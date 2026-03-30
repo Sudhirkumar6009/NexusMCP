@@ -101,7 +101,7 @@ async def default_flow(request: DefaultFlowRequest) -> DefaultFlowResponse:
     │     └─ Compile results and return to user                   │
     └─────────────────────────────────────────────────────────────┘
     
-    Example Query: "Create branch and pull request for Jira issue ABC-123 in repo backend"
+    Example Query: "Create branch and pull request for Jira issue KAN-3 in repo backend"
     
     Response includes:
     - Step-by-step status (pending → running → done/failed)

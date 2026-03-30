@@ -20,7 +20,7 @@ SERVICE_PATTERNS: Dict[str, List[str]] = {
         r"\btask\b",
         r"\bstory\b",
         r"\bepic\b",
-        r"\b[A-Z][A-Z0-9]+-\d+\b",  # Issue key pattern like ABC-123
+        r"\b[A-Z][A-Z0-9]+-\d+\b",  # Issue key pattern like KAN-3
     ],
     "github": [
         r"\bgithub\b",
@@ -363,7 +363,7 @@ class RequiredAPIAgent(BaseAgent):
         """Extract common parameters from the prompt."""
         params = {}
         
-        # Extract Jira issue key (e.g., ABC-123)
+        # Extract Jira issue key (e.g., KAN-3)
         issue_match = re.search(r"\b([A-Z][A-Z0-9]+-\d+)\b", prompt)
         if issue_match:
             params["issue_key"] = issue_match.group(1)

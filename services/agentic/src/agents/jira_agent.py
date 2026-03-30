@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
@@ -110,13 +111,65 @@ class JiraAgent(BaseAgent):
         if self.gemini.enabled:
             try:
                 plan = await self._llm_plan(prompt, jira_tools, context)
+                plan = self._enforce_prompt_issue_key(plan, prompt)
                 logger.info(f"LLM generated {len(plan.operations)} Jira operations")
                 return plan
             except Exception as e:
                 logger.warning(f"LLM planning failed: {e}, using heuristic")
 
         # Fallback to heuristic planning
-        return self._heuristic_plan(prompt, jira_tools, context)
+        heuristic_plan = self._heuristic_plan(prompt, jira_tools, context)
+        return self._enforce_prompt_issue_key(heuristic_plan, prompt)
+
+    def _extract_prompt_issue_key(self, prompt: str) -> str:
+        issue_match = re.search(r"\b([A-Z][A-Z0-9]+-\d+)\b", prompt)
+        return issue_match.group(1) if issue_match else ""
+
+    def _enforce_prompt_issue_key(
+        self,
+        plan: JiraWorkflowPlan,
+        prompt: str,
+    ) -> JiraWorkflowPlan:
+        prompt_issue_key = self._extract_prompt_issue_key(prompt)
+        if not prompt_issue_key:
+            return plan
+
+        plan.extracted_params["issue_key"] = prompt_issue_key
+
+        for operation in plan.operations:
+            issue_argument_keys = [
+                key for key in operation.arguments if "issue" in key.lower()
+            ]
+
+            for key in issue_argument_keys:
+                operation.arguments[key] = prompt_issue_key
+
+            if (
+                operation.operation in {"get_issue", "update_issue"}
+                and not issue_argument_keys
+            ):
+                operation.arguments["issue_key"] = prompt_issue_key
+
+            normalized_operation = operation.operation.strip().lower().replace("-", "_")
+            if normalized_operation == "update_issue" and not self._has_update_payload(
+                operation.arguments
+            ):
+                operation.arguments["status"] = self._extract_status(prompt.lower())
+
+        return plan
+
+    @staticmethod
+    def _has_update_payload(arguments: Dict[str, Any]) -> bool:
+        fields = arguments.get("fields")
+        if isinstance(fields, dict) and len(fields) > 0:
+            return True
+
+        for key in ("status", "state", "transition_id", "transitionId"):
+            value = arguments.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+
+        return False
 
     def _filter_jira_tools(self, tools: Dict[str, Any]) -> Dict[str, Any]:
         """Filter to only include Jira-related tools."""
@@ -160,7 +213,7 @@ JIRA OPERATIONS:
    - Arguments: issue_key, status (or transition_id), comment (optional)
 
 RULES:
-1. Extract issue keys from prompt (format: ABC-123, PROJ-456)
+1. Extract issue keys from prompt (format: KAN-3, PROJ-456)
 2. If issue key found → start with get_issue
 3. If searching → use search_issues with JQL
 4. If creating → use create_issue
@@ -172,12 +225,12 @@ OUTPUT FORMAT:
   "operations": [
     {{
       "operation": "get_issue",
-      "arguments": {{ "issue_key": "ABC-123" }},
+            "arguments": {{ "issue_key": "PROJ-123" }},
       "description": "Fetch issue details"
     }}
   ],
   "extracted_params": {{
-    "issue_key": "ABC-123"
+        "issue_key": "PROJ-123"
   }},
   "summary": "Brief description"
 }}"""
@@ -214,8 +267,6 @@ OUTPUT FORMAT:
         context: Optional[Dict[str, Any]],
     ) -> JiraWorkflowPlan:
         """Generate plan using heuristics."""
-        import re
-        
         normalized = prompt.lower()
         operations: List[JiraOperation] = []
         extracted_params: Dict[str, str] = {}

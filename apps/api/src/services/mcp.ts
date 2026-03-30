@@ -49,6 +49,14 @@ const METHOD_ALIASES: Record<string, string> = {
   github_create_pull_request: "github.createPullRequest",
   "github.create_branch": "github.createBranch",
   github_create_branch: "github.createBranch",
+  "github.create_file": "github.createOrUpdateFile",
+  github_create_file: "github.createOrUpdateFile",
+  "github.update_file": "github.createOrUpdateFile",
+  github_update_file: "github.createOrUpdateFile",
+  "github.create_or_update_file": "github.createOrUpdateFile",
+  github_create_or_update_file: "github.createOrUpdateFile",
+  "github.commit_file": "github.createOrUpdateFile",
+  github_commit_file: "github.createOrUpdateFile",
   "slack.send_message": "slack.sendMessage",
   slack_send_message: "slack.sendMessage",
   "slack.post_message": "slack.sendMessage",
@@ -144,6 +152,65 @@ function parseRepoFromPrompt(prompt: string): string | undefined {
     /(?:repo|repository)\s+([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+|[A-Za-z0-9_.-]+)/i,
   );
   return match?.[1];
+}
+
+function normalizeRepositoryIdentifier(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const urlMatch = trimmed.match(
+    /github\.com[/:]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?(?:\/|$)/i,
+  );
+  if (urlMatch) {
+    const owner = urlMatch[1]?.trim();
+    const repo = urlMatch[2]?.trim();
+    if (owner && repo) {
+      return `${owner}/${repo}`;
+    }
+  }
+
+  return trimmed.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "");
+}
+
+function resolveDefaultRepositoryFromEnv(): string | undefined {
+  const candidates = [
+    process.env.GITHUB_DEFAULT_REPO,
+    process.env.GITHUB_REPO,
+    process.env.REPO,
+  ];
+
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== "string") {
+      continue;
+    }
+
+    const normalized = normalizeRepositoryIdentifier(candidate);
+    if (normalized && normalized.includes("/")) {
+      return normalized;
+    }
+  }
+
+  return undefined;
+}
+
+function resolveDefaultOwnerFromEnv(): string | undefined {
+  const direct =
+    typeof process.env.GITHUB_DEFAULT_OWNER === "string"
+      ? process.env.GITHUB_DEFAULT_OWNER.trim()
+      : "";
+  if (direct) {
+    return direct;
+  }
+
+  const fromRepo = resolveDefaultRepositoryFromEnv();
+  if (!fromRepo) {
+    return undefined;
+  }
+
+  const [owner] = fromRepo.split("/", 1);
+  return owner || undefined;
 }
 
 function normalizeErrorDetail(payload: unknown, fallback: string): string {
@@ -342,10 +409,13 @@ function resolveIssueKey(params: JsonRecord): string {
     return fromPrompt;
   }
 
-  throw new Error("Issue key is required (for example ABC-123).");
+  throw new Error("Issue key is required (for example KAN-3).");
 }
 
-function resolveRepository(params: JsonRecord): string {
+async function resolveRepository(
+  params: JsonRecord,
+  config: GitHubConfig,
+): Promise<string> {
   const candidate = pickString(params, ["repo", "repository", "repo_name"]);
   const prompt = pickString(params, ["prompt", "input"]) || "";
 
@@ -354,24 +424,56 @@ function resolveRepository(params: JsonRecord): string {
     repo = parseRepoFromPrompt(prompt);
   }
 
+  if (!repo) {
+    repo = resolveDefaultRepositoryFromEnv();
+  }
+
   if (!repo || isPlaceholderValue(repo)) {
     throw new Error(
       "Repository is required. Provide owner/repo in tool arguments or mention 'repo owner/name' in prompt.",
     );
   }
 
-  repo = repo.replace(/^\/+|\/+$/g, "");
+  repo = normalizeRepositoryIdentifier(repo);
+  if (!repo) {
+    throw new Error(
+      "Repository is required. Provide owner/repo in tool arguments or mention 'repo owner/name' in prompt.",
+    );
+  }
 
   if (!repo.includes("/")) {
-    const owner =
-      pickString(params, ["owner"]) ||
-      (typeof process.env.GITHUB_DEFAULT_OWNER === "string"
-        ? process.env.GITHUB_DEFAULT_OWNER.trim()
-        : "");
+    const ownerFromParams = pickString(params, ["owner"]);
+    const ownerFromEnv = resolveDefaultOwnerFromEnv();
+
+    let owner =
+      ownerFromParams && !isPlaceholderValue(ownerFromParams)
+        ? ownerFromParams
+        : ownerFromEnv;
+
+    if (!owner) {
+      const userResponse = await githubRequest(config, "GET", "/user");
+      if (userResponse.status >= 200 && userResponse.status < 300) {
+        const userPayload = parseBodyAsRecord(userResponse.payload);
+        const login = pickString(userPayload, ["login"]);
+        if (login) {
+          owner = login;
+        }
+      }
+    }
+
+    if (!owner) {
+      const defaultRepo = resolveDefaultRepositoryFromEnv();
+      if (defaultRepo && defaultRepo.includes("/")) {
+        const [defaultOwner] = defaultRepo.split("/", 1);
+        if (defaultOwner) {
+          owner = defaultOwner;
+        }
+      }
+    }
 
     if (!owner) {
       throw new Error(
-        "Repository must be owner/repo. Set GITHUB_DEFAULT_OWNER to use short repo names.",
+        "Repository must be owner/repo. Provide owner, set GITHUB_DEFAULT_OWNER, or configure GITHUB_DEFAULT_REPO.",
       );
     }
 
@@ -420,6 +522,65 @@ function resolveOptionalIssueKey(params: JsonRecord): string | undefined {
 
 function resolveBaseBranch(params: JsonRecord): string {
   return pickString(params, ["base", "base_branch", "target_branch"]) || "main";
+}
+
+function resolveFilePath(params: JsonRecord): string {
+  const direct = pickString(params, ["path", "file", "file_path", "filename"]);
+  if (direct && !isPlaceholderValue(direct)) {
+    return direct.replace(/^\/+/, "");
+  }
+
+  const issueKey = resolveOptionalIssueKey(params);
+  if (issueKey) {
+    return `${issueKey}.txt`;
+  }
+
+  return "AUTOMATION_CHANGE.txt";
+}
+
+function resolveFileContent(params: JsonRecord): string {
+  const direct = pickString(params, ["content", "text", "file_content"]);
+  if (direct && !isPlaceholderValue(direct)) {
+    return direct;
+  }
+
+  const issueKey = resolveOptionalIssueKey(params);
+  if (issueKey) {
+    return `Fix for ${issueKey}`;
+  }
+
+  return "Automated change from NexusMCP";
+}
+
+function resolveCommitMessage(params: JsonRecord): string {
+  const direct = pickString(params, [
+    "message",
+    "commit_message",
+    "commitMessage",
+  ]);
+  if (direct && !isPlaceholderValue(direct)) {
+    return direct;
+  }
+
+  const issueKey = resolveOptionalIssueKey(params);
+  if (issueKey) {
+    return `Fix ${issueKey}`;
+  }
+
+  return "Automated update";
+}
+
+function buildRetryBranchName(params: JsonRecord): string {
+  const issueKey = resolveOptionalIssueKey(params) || "automation";
+  const normalizedIssueKey =
+    issueKey
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "automation";
+
+  return `feature/${normalizedIssueKey}-${Date.now()}-${Math.floor(
+    Math.random() * 10000,
+  )}`;
 }
 
 function resolveTitle(params: JsonRecord): string {
@@ -579,6 +740,47 @@ function buildJiraDescription(description: string): JsonRecord {
   };
 }
 
+function normalizeTransitionName(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+async function resolveJiraTransitionId(
+  config: JiraConfig,
+  issueKey: string,
+  transitionName: string,
+): Promise<string> {
+  const transitionsPayload = await jiraRequest(
+    config,
+    "GET",
+    `/rest/api/3/issue/${encodeURIComponent(issueKey)}/transitions`,
+  );
+
+  const transitions = parseBodyAsList(transitionsPayload.transitions);
+  const targetName = normalizeTransitionName(transitionName);
+
+  const matched = transitions.find((entry) => {
+    const transition = parseBodyAsRecord(entry);
+    const name = pickString(transition, ["name"]);
+    return Boolean(name && normalizeTransitionName(name) === targetName);
+  });
+
+  if (matched) {
+    const transitionRecord = parseBodyAsRecord(matched);
+    const transitionId = pickString(transitionRecord, ["id"]);
+    if (transitionId) {
+      return transitionId;
+    }
+  }
+
+  const availableTransitions = transitions
+    .map((entry) => pickString(parseBodyAsRecord(entry), ["name"]))
+    .filter((name): name is string => Boolean(name));
+
+  throw new Error(
+    `Jira transition '${transitionName}' is not available for ${issueKey}. Available transitions: ${availableTransitions.join(", ") || "none"}.`,
+  );
+}
+
 async function invokeGatewayTool(
   gatewayName: keyof typeof registeredGateways,
   tool: string,
@@ -709,31 +911,57 @@ const handlers: Record<string, MCPHandler> = {
     const issueKey = resolveIssueKey(payload);
     const config = getJiraConfig(payload);
 
-    const issue = await jiraRequest(
-      config,
-      "GET",
-      `/rest/api/3/issue/${encodeURIComponent(issueKey)}`,
-    );
+    try {
+      const issue = await jiraRequest(
+        config,
+        "GET",
+        `/rest/api/3/issue/${encodeURIComponent(issueKey)}`,
+      );
 
-    const fields = parseBodyAsRecord(issue.fields);
-    const status = parseBodyAsRecord(fields.status);
+      const fields = parseBodyAsRecord(issue.fields);
+      const status = parseBodyAsRecord(fields.status);
 
-    dataStore.addLog({
-      level: "info",
-      service: "jira",
-      action: "get_issue",
-      message: `Fetched Jira issue ${issueKey}`,
-      details: { issueKey },
-    });
+      dataStore.addLog({
+        level: "info",
+        service: "jira",
+        action: "get_issue",
+        message: `Fetched Jira issue ${issueKey}`,
+        details: { issueKey },
+      });
 
-    return {
-      id: issue.id,
-      key: issue.key,
-      summary: fields.summary,
-      status: status.name,
-      url: `${config.baseUrl}/browse/${issue.key || issueKey}`,
-      raw: issue,
-    };
+      return {
+        id: issue.id,
+        key: issue.key,
+        summary: fields.summary,
+        status: status.name,
+        url: `${config.baseUrl}/browse/${issue.key || issueKey}`,
+        raw: issue,
+      };
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unknown Jira error";
+
+      if (/jira request failed \(404\)/i.test(message)) {
+        dataStore.addLog({
+          level: "warning",
+          service: "jira",
+          action: "get_issue_not_found",
+          message: `Jira issue ${issueKey} not found; continuing workflow with issue key only`,
+          details: { issueKey },
+        });
+
+        return {
+          id: null,
+          key: issueKey,
+          summary: `Issue ${issueKey} not found`,
+          status: "NOT_FOUND",
+          url: `${config.baseUrl}/browse/${issueKey}`,
+          missing: true,
+        };
+      }
+
+      throw error;
+    }
   },
 
   "jira.getIssues": async (params) => {
@@ -778,29 +1006,100 @@ const handlers: Record<string, MCPHandler> = {
     const config = getJiraConfig(payload);
     const issueKey = resolveIssueKey(payload);
     const fields = parseBodyAsRecord(payload.fields);
+    const requestedStatus = pickString(payload, ["status", "state"]);
+    const requestedTransitionId = pickString(payload, [
+      "transition_id",
+      "transitionId",
+    ]);
+    const transitionComment = pickString(payload, ["comment"]);
 
-    if (Object.keys(fields).length === 0) {
-      throw new Error("Jira update requires a non-empty fields object.");
+    if (Object.keys(fields).length > 0) {
+      await jiraRequest(
+        config,
+        "PUT",
+        `/rest/api/3/issue/${encodeURIComponent(issueKey)}`,
+        { fields },
+      );
+
+      dataStore.addLog({
+        level: "info",
+        service: "jira",
+        action: "update_issue",
+        message: `Updated issue ${issueKey}`,
+        details: {
+          issueKey,
+          updatedFields: Object.keys(fields),
+          mode: "fields",
+        },
+      });
+
+      return {
+        success: true,
+        issueKey,
+        mode: "fields",
+      };
+    }
+
+    if (!requestedStatus && !requestedTransitionId) {
+      throw new Error(
+        "Jira update requires either a non-empty fields object or a status/transition_id.",
+      );
+    }
+
+    const transitionId =
+      requestedTransitionId ||
+      (requestedStatus
+        ? await resolveJiraTransitionId(config, issueKey, requestedStatus)
+        : undefined);
+
+    if (!transitionId) {
+      throw new Error(
+        "Could not resolve Jira transition id for update request.",
+      );
+    }
+
+    const transitionPayload: JsonRecord = {
+      transition: { id: transitionId },
+    };
+
+    if (transitionComment) {
+      transitionPayload.update = {
+        comment: [
+          {
+            add: {
+              body: buildJiraDescription(transitionComment),
+            },
+          },
+        ],
+      };
     }
 
     await jiraRequest(
       config,
-      "PUT",
-      `/rest/api/3/issue/${encodeURIComponent(issueKey)}`,
-      { fields },
+      "POST",
+      `/rest/api/3/issue/${encodeURIComponent(issueKey)}/transitions`,
+      transitionPayload,
     );
 
     dataStore.addLog({
       level: "info",
       service: "jira",
       action: "update_issue",
-      message: `Updated issue ${issueKey}`,
-      details: { issueKey, updatedFields: Object.keys(fields) },
+      message: `Transitioned issue ${issueKey}`,
+      details: {
+        issueKey,
+        mode: "transition",
+        status: requestedStatus,
+        transitionId,
+      },
     });
 
     return {
       success: true,
       issueKey,
+      mode: "transition",
+      transitionId,
+      status: requestedStatus,
     };
   },
 
@@ -1084,7 +1383,7 @@ const handlers: Record<string, MCPHandler> = {
   "github.createIssue": async (params) => {
     const payload = params as JsonRecord;
     const config = getGitHubConfig(payload);
-    const repo = resolveRepository(payload);
+    const repo = await resolveRepository(payload, config);
     const title = resolveTitle(payload);
     const body = resolveDescription(payload);
 
@@ -1125,7 +1424,7 @@ const handlers: Record<string, MCPHandler> = {
   "github.createBranch": async (params) => {
     const payload = params as JsonRecord;
     const config = getGitHubConfig(payload);
-    const repo = resolveRepository(payload);
+    const repo = await resolveRepository(payload, config);
     const branch = resolveBranchName(payload);
     const base = resolveBaseBranch(payload);
 
@@ -1214,10 +1513,98 @@ const handlers: Record<string, MCPHandler> = {
     };
   },
 
+  "github.createOrUpdateFile": async (params) => {
+    const payload = params as JsonRecord;
+    const config = getGitHubConfig(payload);
+    const repo = await resolveRepository(payload, config);
+    const branch = resolveBranchName(payload);
+    const path = resolveFilePath(payload);
+    const content = resolveFileContent(payload);
+    const message = resolveCommitMessage(payload);
+    const encodedPath = encodeURIComponent(path).replace(/%2F/g, "/");
+
+    let existingSha: string | undefined;
+    const existingResult = await githubRequest(
+      config,
+      "GET",
+      `/repos/${repo}/contents/${encodedPath}?ref=${encodeURIComponent(branch)}`,
+    );
+
+    if (existingResult.status === 200) {
+      const existingPayload = parseBodyAsRecord(existingResult.payload);
+      existingSha = pickString(existingPayload, ["sha"]);
+    } else if (existingResult.status !== 404) {
+      throw new Error(
+        `GitHub read file failed (${existingResult.status}): ${normalizeErrorDetail(
+          existingResult.payload,
+          "Unknown GitHub error",
+        )}`,
+      );
+    }
+
+    const updatePayload: JsonRecord = {
+      message,
+      content: Buffer.from(content, "utf8").toString("base64"),
+      branch,
+    };
+
+    if (existingSha) {
+      updatePayload.sha = existingSha;
+    }
+
+    const writeResult = await githubRequest(
+      config,
+      "PUT",
+      `/repos/${repo}/contents/${encodedPath}`,
+      updatePayload,
+    );
+
+    if (writeResult.status < 200 || writeResult.status >= 300) {
+      throw new Error(
+        `GitHub create/update file failed (${writeResult.status}): ${normalizeErrorDetail(
+          writeResult.payload,
+          "Unknown GitHub error",
+        )}`,
+      );
+    }
+
+    const writePayload = parseBodyAsRecord(writeResult.payload);
+    const commit = parseBodyAsRecord(writePayload.commit);
+    const fileContent = parseBodyAsRecord(writePayload.content);
+    const action = existingSha ? "updated" : "created";
+
+    dataStore.addLog({
+      level: "info",
+      service: "github",
+      action: "create_or_update_file",
+      message: `${action === "updated" ? "Updated" : "Created"} ${path} in ${repo}@${branch}`,
+      details: {
+        repo,
+        branch,
+        path,
+        action,
+        commitSha: commit.sha,
+      },
+    });
+
+    return {
+      repo,
+      branch,
+      path,
+      action,
+      message,
+      sha: fileContent.sha,
+      commitSha: commit.sha,
+      url:
+        fileContent.html_url ||
+        `https://github.com/${repo}/blob/${branch}/${path}`,
+    };
+  },
+
   "github.createPullRequest": async (params) => {
     const payload = params as JsonRecord;
     const config = getGitHubConfig(payload);
-    const repo = resolveRepository(payload);
+    const repo = await resolveRepository(payload, config);
     const head = resolveBranchName(payload);
     const base = resolveBaseBranch(payload);
 
@@ -1226,39 +1613,108 @@ const handlers: Record<string, MCPHandler> = {
       `Automated PR for ${resolveOptionalIssueKey(payload) || "workflow"}`;
     const body = resolveDescription(payload);
 
-    const pull = await githubRequestOrThrow(
-      config,
-      "POST",
-      `/repos/${repo}/pulls`,
-      {
+    const createPullRequest = async (headBranch: string) =>
+      githubRequest(config, "POST", `/repos/${repo}/pulls`, {
+        title,
+        head: headBranch,
+        base,
+        ...(body ? { body } : {}),
+      });
+
+    const initialPullResult = await createPullRequest(head);
+
+    if (initialPullResult.status >= 200 && initialPullResult.status < 300) {
+      const pull = parseBodyAsRecord(initialPullResult.payload);
+
+      dataStore.addLog({
+        level: "info",
+        service: "github",
+        action: "create_pr",
+        message: `Created PR #${String(pull.number)} in ${repo}: ${head} -> ${base}`,
+        details: { repo, title, head, base, number: pull.number },
+      });
+
+      return {
+        number: pull.number,
+        url: pull.html_url,
         title,
         head,
         base,
-        ...(body ? { body } : {}),
-      },
-    );
+      };
+    }
+
+    if (initialPullResult.status !== 422) {
+      throw new Error(
+        `GitHub create pull request failed (${initialPullResult.status}): ${normalizeErrorDetail(
+          initialPullResult.payload,
+          "Unknown GitHub error",
+        )}`,
+      );
+    }
+
+    const retryBranch = buildRetryBranchName(payload);
+
+    await handlers["github.createBranch"]({
+      ...payload,
+      repo,
+      branch: retryBranch,
+      branch_name: retryBranch,
+      base,
+      base_branch: base,
+    });
+
+    await handlers["github.createOrUpdateFile"]({
+      ...payload,
+      repo,
+      branch: retryBranch,
+      branch_name: retryBranch,
+      path: resolveFilePath(payload),
+      content: resolveFileContent(payload),
+      message: resolveCommitMessage(payload),
+    });
+
+    const retryPullResult = await createPullRequest(retryBranch);
+
+    if (retryPullResult.status < 200 || retryPullResult.status >= 300) {
+      throw new Error(
+        `GitHub create pull request failed after retry (${retryPullResult.status}): ${normalizeErrorDetail(
+          retryPullResult.payload,
+          "Unknown GitHub error",
+        )}`,
+      );
+    }
+
+    const pull = parseBodyAsRecord(retryPullResult.payload);
 
     dataStore.addLog({
       level: "info",
       service: "github",
       action: "create_pr",
-      message: `Created PR #${String(pull.number)} in ${repo}: ${head} -> ${base}`,
-      details: { repo, title, head, base, number: pull.number },
+      message: `Created PR #${String(pull.number)} in ${repo}: ${retryBranch} -> ${base} (retry after 422)`,
+      details: {
+        repo,
+        title,
+        head: retryBranch,
+        base,
+        number: pull.number,
+        retriedAfter422: true,
+      },
     });
 
     return {
       number: pull.number,
       url: pull.html_url,
       title,
-      head,
+      head: retryBranch,
       base,
+      retriedAfter422: true,
     };
   },
 
   "github.getRepository": async (params) => {
     const payload = params as JsonRecord;
     const config = getGitHubConfig(payload);
-    const repo = resolveRepository(payload);
+    const repo = await resolveRepository(payload, config);
 
     const repository = await githubRequestOrThrow(
       config,
@@ -1372,6 +1828,9 @@ export async function executeNode(
     },
     github: {
       "create-branch": "github.createBranch",
+      "create-file": "github.createOrUpdateFile",
+      "update-file": "github.createOrUpdateFile",
+      "commit-file": "github.createOrUpdateFile",
       "create-issue": "github.createIssue",
       "create-pr": "github.createPullRequest",
       "on-push": "github.getRepository",
@@ -1432,6 +1891,11 @@ export function getAvailableMethods(): {
     {
       method: "github.createBranch",
       description: "Create a branch in a GitHub repository",
+    },
+    {
+      method: "github.createOrUpdateFile",
+      description:
+        "Create or update a file in a GitHub branch (creates a commit)",
     },
     { method: "github.createIssue", description: "Create a GitHub issue" },
     {

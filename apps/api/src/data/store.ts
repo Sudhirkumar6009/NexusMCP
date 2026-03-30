@@ -86,7 +86,13 @@ class DataStore {
             name: "Update Issue",
             type: "action",
             description: "Update an existing issue",
-            inputSchema: { issueKey: "string", fields: "object" },
+            inputSchema: {
+              issueKey: "string",
+              fields: "object",
+              status: "string",
+              transition_id: "string",
+              comment: "string",
+            },
             outputSchema: { success: "boolean" },
           },
         ],
@@ -152,6 +158,25 @@ class DataStore {
               base: "string",
             },
             outputSchema: { number: "number", url: "string" },
+          },
+          {
+            id: "github-create-or-update-file",
+            name: "Create or Update File",
+            type: "action",
+            description:
+              "Create or update a file in a branch (creates a commit)",
+            inputSchema: {
+              repo: "string",
+              branch: "string",
+              path: "string",
+              content: "string",
+              message: "string",
+            },
+            outputSchema: {
+              path: "string",
+              commitSha: "string",
+              url: "string",
+            },
           },
           {
             id: "github-on-push",

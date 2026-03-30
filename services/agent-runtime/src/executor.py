@@ -59,10 +59,12 @@ class DAGExecutor:
         max_retries: int = 3,
         retry_delay: float = 1.0,
         node_timeout: float = 30.0,
+        fail_fast: bool = False,
     ):
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.node_timeout = node_timeout
+        self.fail_fast = fail_fast
         self._tool_handlers: Dict[str, Callable] = {}
         self._approval_callback: Optional[Callable] = None
 
@@ -105,6 +107,7 @@ class DAGExecutor:
         layers = self._build_execution_layers(nodes, edges)
         
         # Execute layer by layer
+        had_failures = False
         for layer_idx, layer_nodes in enumerate(layers):
             state.current_layer = layer_idx
             
@@ -117,6 +120,7 @@ class DAGExecutor:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
             # Process results
+            layer_failed = False
             for node, result in zip(layer_nodes, results):
                 if isinstance(result, BaseException):
                     state.node_results[node["id"]] = NodeResult(
@@ -124,21 +128,32 @@ class DAGExecutor:
                         status=NodeStatus.FAILED,
                         error=str(result),
                     )
-                    state.status = "failed"
-                    break
+                    layer_failed = True
+                    had_failures = True
+                    if self.fail_fast:
+                        break
                 elif isinstance(result, NodeResult):
                     state.node_results[node["id"]] = result
+
+                    if result.status == NodeStatus.FAILED:
+                        layer_failed = True
+                        had_failures = True
+                        if self.fail_fast:
+                            break
                     
                     # Check for approval gate
                     if result.status == NodeStatus.WAITING_APPROVAL:
                         state.status = "paused"
                         return state
             
-            if state.status == "failed":
+            if layer_failed:
+                state.status = "failed"
+
+            if self.fail_fast and layer_failed:
                 break
         
         state.completed_at = datetime.utcnow()
-        if state.status == "running":
+        if state.status == "running" and not had_failures:
             state.status = "completed"
             
         return state

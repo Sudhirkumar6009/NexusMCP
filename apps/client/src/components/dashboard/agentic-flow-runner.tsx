@@ -123,7 +123,11 @@ const TOOL_INPUT_FALLBACKS: Record<string, Record<string, string>> = {
   },
   "jira.update_issue": {
     issueKey: "string",
+    issue_key: "string",
     fields: "object",
+    status: "string",
+    transition_id: "string",
+    comment: "string",
   },
   "github.create_branch": {
     repo: "string",
@@ -145,6 +149,34 @@ const TOOL_INPUT_FALLBACKS: Record<string, Record<string, string>> = {
     body: "string",
     head: "string",
     base: "string",
+  },
+  "github.create_or_update_file": {
+    repo: "string",
+    branch: "string",
+    path: "string",
+    content: "string",
+    message: "string",
+  },
+  "github.createorupdatefile": {
+    repo: "string",
+    branch: "string",
+    path: "string",
+    content: "string",
+    message: "string",
+  },
+  "github.create_file": {
+    repo: "string",
+    branch: "string",
+    path: "string",
+    content: "string",
+    message: "string",
+  },
+  "github.update_file": {
+    repo: "string",
+    branch: "string",
+    path: "string",
+    content: "string",
+    message: "string",
   },
   "github.create_issue": {
     repo: "string",
@@ -295,6 +327,22 @@ function getToolNameVariants(serviceId: ServiceId, toolName: string): string[] {
     }
     if (normalizedToolName.endsWith(".create_branch")) {
       addVariants("github.createBranch");
+    }
+    if (normalizedToolName.endsWith(".create_or_update_file")) {
+      addVariants(
+        `${serviceId}.create_file`,
+        `${serviceId}.update_file`,
+        "github.createOrUpdateFile",
+      );
+    }
+    if (
+      normalizedToolName.endsWith(".create_file") ||
+      normalizedToolName.endsWith(".update_file")
+    ) {
+      addVariants(
+        `${serviceId}.create_or_update_file`,
+        "github.createOrUpdateFile",
+      );
     }
   }
 

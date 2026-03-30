@@ -79,6 +79,165 @@ class SmartOrchestrator:
         self.gemini = gemini
         self.logs: List[ExecutionLog] = []
 
+    @staticmethod
+    def _is_valid_branch_candidate(candidate: str) -> bool:
+        invalid_tokens = {
+            "and",
+            "or",
+            "for",
+            "with",
+            "from",
+            "to",
+            "pr",
+            "pull",
+            "request",
+            "in",
+            "on",
+        }
+        return bool(candidate and candidate.lower() not in invalid_tokens)
+
+    def _extract_prompt_params(self, prompt: str) -> Dict[str, str]:
+        extracted: Dict[str, str] = {}
+
+        issue_match = re.search(r"\b([A-Z][A-Z0-9]+-\d+)\b", prompt)
+        if issue_match:
+            extracted["issue_key"] = issue_match.group(1)
+
+        repo_patterns = [
+            r"\brepo(?:sitory)?\s+([a-zA-Z0-9._/-]+)",
+            r"\bin\s+repo(?:sitory)?\s+([a-zA-Z0-9._/-]+)",
+            r"\bin\s+([a-zA-Z0-9._/-]+)\s+repo(?:sitory)?",
+        ]
+        for pattern in repo_patterns:
+            repo_match = re.search(pattern, prompt, re.IGNORECASE)
+            if repo_match:
+                extracted["repo"] = repo_match.group(1)
+                break
+
+        branch_match = re.search(
+            r"\b(?:branch(?:\s+name)?|head)\s+([a-zA-Z0-9._/-]+)\b",
+            prompt,
+            re.IGNORECASE,
+        )
+        if branch_match:
+            branch_candidate = branch_match.group(1)
+            if self._is_valid_branch_candidate(branch_candidate):
+                extracted["branch_name"] = branch_candidate
+
+        if extracted.get("issue_key") and "branch_name" not in extracted:
+            extracted["branch_name"] = f"feature/{extracted['issue_key']}"
+
+        return extracted
+
+    def _apply_prompt_overrides(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        prompt_params: Dict[str, str],
+    ) -> Dict[str, Any]:
+        if not prompt_params:
+            return dict(arguments or {})
+
+        overridden = dict(arguments or {})
+        normalized_tool_name = tool_name.lower()
+
+        prompt_issue_key = prompt_params.get("issue_key")
+        prompt_repo = prompt_params.get("repo")
+        prompt_branch = prompt_params.get("branch_name")
+
+        if prompt_issue_key:
+            for key in list(overridden.keys()):
+                if "issue" in key.lower():
+                    overridden[key] = prompt_issue_key
+
+        if prompt_repo:
+            repo_keys = [
+                key
+                for key in overridden
+                if key.lower() in {"repo", "repository", "repo_name", "repository_name"}
+            ]
+            for key in repo_keys:
+                overridden[key] = prompt_repo
+
+            if "github" in normalized_tool_name and not repo_keys:
+                overridden["repo"] = prompt_repo
+
+        if prompt_branch and "github" in normalized_tool_name:
+            branch_keys = [
+                key
+                for key in overridden
+                if key.lower() in {"branch", "branch_name", "head"}
+            ]
+            for key in branch_keys:
+                overridden[key] = prompt_branch
+
+            if "create_branch" in normalized_tool_name and not any(
+                key.lower() in {"branch", "branch_name"}
+                for key in overridden
+            ):
+                overridden["branch_name"] = prompt_branch
+
+            if (
+                ("create_pull_request" in normalized_tool_name or "create_pr" in normalized_tool_name)
+                and "head" not in {key.lower() for key in overridden}
+            ):
+                overridden["head"] = prompt_branch
+
+            if (
+                any(
+                    token in normalized_tool_name
+                    for token in {"create_file", "update_file", "create_or_update_file"}
+                )
+                and "branch" not in {key.lower() for key in overridden}
+            ):
+                overridden["branch"] = prompt_branch
+
+        if prompt_issue_key and "github" in normalized_tool_name:
+            title_key = next((key for key in overridden if key.lower() == "title"), None)
+            if title_key:
+                current_title = str(overridden.get(title_key) or "")
+                if prompt_issue_key not in current_title:
+                    overridden[title_key] = f"Fix {prompt_issue_key}"
+
+        return overridden
+
+    def _apply_prompt_params_to_plan(
+        self,
+        plan: ExecutionPlan,
+        prompt_params: Dict[str, str],
+        available_tools: Optional[Dict[str, ToolDefinition]] = None,
+    ) -> ExecutionPlan:
+        if not prompt_params:
+            if available_tools:
+                plan = self._ensure_github_commit_before_pr(
+                    plan,
+                    available_tools,
+                    prompt_params,
+                )
+            return plan
+
+        for key, value in prompt_params.items():
+            if value:
+                plan.extracted_params[key] = value
+
+        for step in plan.steps:
+            step.arguments = self._apply_prompt_overrides(
+                tool_name=step.tool,
+                arguments=step.arguments,
+                prompt_params=prompt_params,
+            )
+
+        if available_tools:
+            plan = self._ensure_github_commit_before_pr(
+                plan,
+                available_tools,
+                prompt_params,
+            )
+
+        self._remove_invalid_jira_update_steps(plan)
+
+        return plan
+
     def _log(
         self,
         level: str,
@@ -107,6 +266,78 @@ class SmartOrchestrator:
         
         return log_entry
 
+    @staticmethod
+    def _coerce_plan_payload(payload: Any) -> Dict[str, Any]:
+        """
+        Normalize LLM output into the canonical execution plan structure.
+
+        Handles both the preferred {"steps": [...]} payload and legacy
+        single-tool payloads such as {"tool": "...", "arguments": {...}}.
+        """
+        if isinstance(payload, dict):
+            raw_steps = payload.get("steps")
+            if isinstance(raw_steps, list):
+                return {
+                    "steps": raw_steps,
+                    "workflow_type": payload.get("workflow_type", "sequential"),
+                    "summary": payload.get("summary", ""),
+                    "extracted_params": payload.get("extracted_params", {}),
+                }
+
+            single_tool = payload.get("tool")
+            if isinstance(single_tool, str) and single_tool.strip():
+                arguments = payload.get("arguments")
+                return {
+                    "steps": [
+                        {
+                            "id": "1",
+                            "tool": single_tool.strip(),
+                            "arguments": arguments if isinstance(arguments, dict) else {},
+                            "description": str(payload.get("description", "")).strip(),
+                            "depends_on": [],
+                        }
+                    ],
+                    "workflow_type": "sequential",
+                    "summary": str(payload.get("summary", "")).strip(),
+                    "extracted_params": payload.get("extracted_params", {}),
+                }
+
+            raw_calls = payload.get("calls")
+            if isinstance(raw_calls, list):
+                normalized_steps: List[Dict[str, Any]] = []
+                for index, call in enumerate(raw_calls, start=1):
+                    if not isinstance(call, dict):
+                        continue
+
+                    tool = call.get("tool")
+                    if not isinstance(tool, str) or not tool.strip():
+                        continue
+
+                    arguments = call.get("arguments")
+                    normalized_steps.append(
+                        {
+                            "id": str(index),
+                            "tool": tool.strip(),
+                            "arguments": arguments if isinstance(arguments, dict) else {},
+                            "description": str(call.get("description", "")).strip(),
+                            "depends_on": call.get("depends_on", []),
+                        }
+                    )
+
+                return {
+                    "steps": normalized_steps,
+                    "workflow_type": payload.get("workflow_type", "sequential"),
+                    "summary": payload.get("summary", ""),
+                    "extracted_params": payload.get("extracted_params", {}),
+                }
+
+        return {
+            "steps": [],
+            "workflow_type": "sequential",
+            "summary": "",
+            "extracted_params": {},
+        }
+
     async def analyze_and_plan(
         self,
         prompt: str,
@@ -117,6 +348,7 @@ class SmartOrchestrator:
         Use LLM to analyze the query and generate an execution plan.
         """
         self._log("info", "planning", f"Analyzing query: {prompt[:100]}...")
+        prompt_params = self._extract_prompt_params(prompt)
 
         # Build tools schema for LLM
         tools_schema = self._build_tools_schema(available_tools)
@@ -136,6 +368,7 @@ class SmartOrchestrator:
         if self.gemini.enabled:
             try:
                 plan = await self._llm_generate_plan(prompt, tools_schema, connected_services)
+                plan = self._apply_prompt_params_to_plan(plan, prompt_params, available_tools)
                 self._log(
                     "info",
                     "planning",
@@ -153,6 +386,7 @@ class SmartOrchestrator:
 
         # Fallback to heuristic planning
         plan = self._heuristic_plan(prompt, available_tools, connected_services)
+        plan = self._apply_prompt_params_to_plan(plan, prompt_params, available_tools)
         self._log(
             "info",
             "planning",
@@ -170,6 +404,314 @@ class SmartOrchestrator:
                 "inputs": tool_def.inputs,
             }
         return json.dumps(schema, indent=2)
+
+    @staticmethod
+    def _tool_signature(tool_name: str) -> str:
+        return tool_name.lower().replace("_", "").replace(".", "")
+
+    def _is_pr_tool_name(self, tool_name: str) -> bool:
+        signature = self._tool_signature(tool_name)
+        return "createpullrequest" in signature or signature.endswith("createpr")
+
+    def _is_branch_tool_name(self, tool_name: str) -> bool:
+        return "createbranch" in self._tool_signature(tool_name)
+
+    def _is_commit_tool_name(self, tool_name: str) -> bool:
+        signature = self._tool_signature(tool_name)
+        return (
+            "createorupdatefile" in signature
+            or signature.endswith("createfile")
+            or signature.endswith("updatefile")
+            or "commitfile" in signature
+        )
+
+    def _is_jira_update_tool_name(self, tool_name: str) -> bool:
+        signature = self._tool_signature(tool_name)
+        return "jiraupdateissue" in signature or "jiratransitionissue" in signature
+
+    def _has_valid_jira_update_arguments(self, arguments: Dict[str, Any]) -> bool:
+        issue_key = ""
+        for key, value in arguments.items():
+            if "issue" in key.lower() and isinstance(value, str) and value.strip():
+                issue_key = value.strip()
+                break
+
+        if not issue_key:
+            return False
+
+        fields_value = arguments.get("fields")
+        has_fields = isinstance(fields_value, dict) and len(fields_value) > 0
+        if has_fields:
+            return True
+
+        for key, value in arguments.items():
+            lowered = key.lower()
+            if lowered in {"status", "state", "transition_id", "transitionid"}:
+                if isinstance(value, str) and value.strip():
+                    return True
+
+        return False
+
+    def _remove_invalid_jira_update_steps(self, plan: ExecutionPlan) -> None:
+        filtered_steps = [
+            step
+            for step in plan.steps
+            if not self._is_jira_update_tool_name(step.tool)
+            or self._has_valid_jira_update_arguments(step.arguments)
+        ]
+
+        if len(filtered_steps) != len(plan.steps):
+            plan.steps = filtered_steps
+            self._reindex_plan_steps(plan)
+
+    def _find_preferred_tool_name(
+        self,
+        available_tools: Dict[str, ToolDefinition],
+        preferred_names: List[str],
+        predicate,
+    ) -> str | None:
+        for tool_name in preferred_names:
+            if tool_name in available_tools:
+                return tool_name
+
+        for tool_name in available_tools:
+            if predicate(tool_name):
+                return tool_name
+        return None
+
+    def _build_branch_arguments(
+        self,
+        definition: ToolDefinition,
+        repo: str,
+        branch_name: str,
+    ) -> Dict[str, Any]:
+        arguments: Dict[str, Any] = {}
+        for input_name in definition.inputs:
+            lowered = input_name.lower()
+            if lowered in {"repo", "repository", "repo_name", "repository_name"} and repo:
+                arguments[input_name] = repo
+            elif lowered in {"branch", "branch_name", "head"}:
+                arguments[input_name] = branch_name
+            elif lowered in {"base", "base_branch", "target_branch"}:
+                arguments[input_name] = "main"
+        return arguments
+
+    def _build_commit_arguments(
+        self,
+        definition: ToolDefinition,
+        repo: str,
+        branch_name: str,
+        issue_key: str,
+    ) -> Dict[str, Any]:
+        file_path = f"{issue_key}.txt" if issue_key else "AUTOMATION_CHANGE.txt"
+        content = f"Fix for {issue_key}" if issue_key else "Automated change from NexusMCP"
+        message = f"Fix {issue_key}" if issue_key else "Automated update"
+
+        arguments: Dict[str, Any] = {}
+        for input_name in definition.inputs:
+            lowered = input_name.lower()
+            if lowered in {"repo", "repository", "repo_name", "repository_name"} and repo:
+                arguments[input_name] = repo
+            elif lowered in {"branch", "branch_name", "head"}:
+                arguments[input_name] = branch_name
+            elif lowered in {"path", "file", "file_path", "filename"}:
+                arguments[input_name] = file_path
+            elif lowered in {"content", "text", "file_content", "body"}:
+                arguments[input_name] = content
+            elif lowered in {"message", "commit_message", "commitmessage", "title"}:
+                arguments[input_name] = message
+        return arguments
+
+    @staticmethod
+    def _reindex_plan_steps(plan: ExecutionPlan) -> None:
+        id_map: Dict[str, str] = {}
+        for index, step in enumerate(plan.steps, start=1):
+            old_id = str(step.id)
+            new_id = str(index)
+            id_map[old_id] = new_id
+            step.id = new_id
+
+        for step in plan.steps:
+            step.depends_on = [
+                id_map.get(str(dependency), str(dependency))
+                for dependency in (step.depends_on or [])
+                if str(dependency).strip()
+            ]
+
+    def _ensure_github_commit_before_pr(
+        self,
+        plan: ExecutionPlan,
+        available_tools: Dict[str, ToolDefinition],
+        prompt_params: Dict[str, str],
+    ) -> ExecutionPlan:
+        pr_index = next(
+            (
+                index
+                for index, step in enumerate(plan.steps)
+                if self._is_pr_tool_name(step.tool)
+            ),
+            None,
+        )
+        if pr_index is None:
+            return plan
+
+        commit_tool_name = self._find_preferred_tool_name(
+            available_tools,
+            [
+                "github.create_or_update_file",
+                "github_create_or_update_file",
+                "github.createOrUpdateFile",
+                "github.create_file",
+                "github_create_file",
+                "github.update_file",
+                "github_update_file",
+            ],
+            self._is_commit_tool_name,
+        )
+        if not commit_tool_name:
+            return plan
+
+        issue_key = prompt_params.get("issue_key", "")
+        repo = prompt_params.get("repo", "")
+        branch_name = prompt_params.get("branch_name", "")
+
+        pr_step = plan.steps[pr_index]
+        if not repo:
+            repo = str(
+                pr_step.arguments.get("repo")
+                or pr_step.arguments.get("repository")
+                or pr_step.arguments.get("repo_name")
+                or ""
+            )
+
+        if not branch_name:
+            branch_name = str(
+                pr_step.arguments.get("head")
+                or pr_step.arguments.get("branch")
+                or pr_step.arguments.get("branch_name")
+                or ""
+            )
+
+        if not branch_name and issue_key:
+            branch_name = f"feature/{issue_key}"
+        if not branch_name:
+            branch_name = "feature/automation"
+
+        branch_index = next(
+            (
+                index
+                for index, step in enumerate(plan.steps)
+                if self._is_branch_tool_name(step.tool)
+            ),
+            None,
+        )
+
+        if branch_index is None:
+            branch_tool_name = self._find_preferred_tool_name(
+                available_tools,
+                [
+                    "github.create_branch",
+                    "github_create_branch",
+                    "github.createBranch",
+                ],
+                self._is_branch_tool_name,
+            )
+            if branch_tool_name:
+                branch_args = self._build_branch_arguments(
+                    available_tools[branch_tool_name],
+                    repo,
+                    branch_name,
+                )
+                plan.steps.insert(
+                    pr_index,
+                    ExecutionStep(
+                        id=f"auto-branch-{uuid4().hex[:6]}",
+                        tool=branch_tool_name,
+                        arguments=branch_args,
+                        description="Create feature branch before committing changes",
+                    ),
+                )
+                pr_index += 1
+
+        commit_index = next(
+            (
+                index
+                for index, step in enumerate(plan.steps)
+                if self._is_commit_tool_name(step.tool)
+            ),
+            None,
+        )
+
+        if commit_index is None:
+            commit_args = self._build_commit_arguments(
+                available_tools[commit_tool_name],
+                repo,
+                branch_name,
+                issue_key,
+            )
+            depends_on: List[str] = []
+            for index in range(pr_index - 1, -1, -1):
+                if self._is_branch_tool_name(plan.steps[index].tool):
+                    depends_on = [str(plan.steps[index].id)]
+                    break
+
+            plan.steps.insert(
+                pr_index,
+                ExecutionStep(
+                    id=f"auto-commit-{uuid4().hex[:6]}",
+                    tool=commit_tool_name,
+                    arguments=commit_args,
+                    depends_on=depends_on,
+                    description="Create or update a file to ensure a commit exists before PR",
+                ),
+            )
+        else:
+            commit_step = plan.steps[commit_index]
+            commit_definition = available_tools.get(commit_step.tool)
+            if commit_definition:
+                defaults = self._build_commit_arguments(
+                    commit_definition,
+                    repo,
+                    branch_name,
+                    issue_key,
+                )
+                for key, value in defaults.items():
+                    if key not in commit_step.arguments or not commit_step.arguments.get(key):
+                        commit_step.arguments[key] = value
+
+            if commit_index > pr_index:
+                moved_commit = plan.steps.pop(commit_index)
+                plan.steps.insert(pr_index, moved_commit)
+
+        pr_index = next(
+            (
+                index
+                for index, step in enumerate(plan.steps)
+                if self._is_pr_tool_name(step.tool)
+            ),
+            None,
+        )
+        if pr_index is None:
+            self._reindex_plan_steps(plan)
+            return plan
+
+        commit_dependency = next(
+            (
+                str(plan.steps[index].id)
+                for index in range(pr_index - 1, -1, -1)
+                if self._is_commit_tool_name(plan.steps[index].tool)
+            ),
+            None,
+        )
+        if commit_dependency:
+            pr_step = plan.steps[pr_index]
+            existing_dependencies = [str(dep) for dep in (pr_step.depends_on or [])]
+            if commit_dependency not in existing_dependencies:
+                existing_dependencies.append(commit_dependency)
+                pr_step.depends_on = existing_dependencies
+
+        self._reindex_plan_steps(plan)
+        return plan
 
     async def _llm_generate_plan(
         self,
@@ -195,13 +737,16 @@ RULES:
 6. For GitHub branch operations:
    - Use branch_name format: "feature/{{issue_key}}" 
    - base_branch should be "main" unless specified
-7. For GitHub PR operations:
+7. For GitHub commit operations:
+    - Always include create_or_update_file/create_file/update_file before PR
+    - Include repo, branch/head, path, content, and message when available
+8. For GitHub PR operations:
    - head = the feature branch name
    - base = "main" unless specified
    - title should reference the issue
-8. Do NOT skip steps - follow the logical order
-9. Do NOT invent fields not in the tool schema
-10. Return ONLY valid JSON - no explanations
+9. Do NOT skip steps - follow the logical order
+10. Do NOT invent fields not in the tool schema
+11. Return ONLY valid JSON - no explanations
 
 OUTPUT FORMAT:
 {{
@@ -216,8 +761,8 @@ OUTPUT FORMAT:
   "workflow_type": "sequential",
   "summary": "Brief description of what the workflow does",
   "extracted_params": {{
-    "issue_key": "ABC-123",
-    "repo": "backend"
+        "issue_key": "PROJ-123",
+        "repo": "repo-from-request"
   }}
 }}"""
 
@@ -227,9 +772,11 @@ OUTPUT FORMAT:
             strict_json=True,
         )
 
+        normalized_response = self._coerce_plan_payload(response)
+
         # Parse response into ExecutionPlan
         steps = []
-        for step_data in response.get("steps", []):
+        for step_data in normalized_response.get("steps", []):
             steps.append(ExecutionStep(
                 id=str(step_data.get("id", len(steps) + 1)),
                 tool=step_data.get("tool", ""),
@@ -240,9 +787,9 @@ OUTPUT FORMAT:
 
         return ExecutionPlan(
             steps=steps,
-            workflow_type=response.get("workflow_type", "sequential"),
-            summary=response.get("summary", ""),
-            extracted_params=response.get("extracted_params", {}),
+            workflow_type=normalized_response.get("workflow_type", "sequential"),
+            summary=normalized_response.get("summary", ""),
+            extracted_params=normalized_response.get("extracted_params", {}),
         )
 
     def _heuristic_plan(
@@ -293,7 +840,7 @@ OUTPUT FORMAT:
 
         # Generate steps based on detected workflow
         if detected_workflow == "jira_github_pr":
-            # Jira → GitHub branch → GitHub PR workflow
+            # Jira → GitHub branch → GitHub commit → GitHub PR workflow
             if "jira.get_issue" in tools or "jira_get_issue" in tools:
                 tool_name = "jira.get_issue" if "jira.get_issue" in tools else "jira_get_issue"
                 steps.append(ExecutionStep(
@@ -317,10 +864,53 @@ OUTPUT FORMAT:
                     depends_on=["1"],
                 ))
 
+            commit_tool_name = None
+            for candidate in [
+                "github.create_or_update_file",
+                "github_create_or_update_file",
+                "github.createOrUpdateFile",
+                "github.create_file",
+                "github_create_file",
+                "github.update_file",
+                "github_update_file",
+            ]:
+                if candidate in tools:
+                    commit_tool_name = candidate
+                    break
+
+            if not commit_tool_name:
+                for tool_name in tools:
+                    if self._is_commit_tool_name(tool_name):
+                        commit_tool_name = tool_name
+                        break
+
+            if commit_tool_name:
+                steps.append(ExecutionStep(
+                    id="3",
+                    tool=commit_tool_name,
+                    arguments={
+                        "repo": extracted_params.get("repo", ""),
+                        "branch": branch_name,
+                        "path": f"{extracted_params.get('issue_key', 'AUTOMATION')}.txt",
+                        "content": (
+                            f"Fix for {extracted_params.get('issue_key')}"
+                            if extracted_params.get("issue_key")
+                            else "Automated change from NexusMCP"
+                        ),
+                        "message": (
+                            f"Fix {extracted_params.get('issue_key')}"
+                            if extracted_params.get("issue_key")
+                            else "Automated update"
+                        ),
+                    },
+                    description="Create or update file to ensure commit exists",
+                    depends_on=["2"] if any(self._is_branch_tool_name(step.tool) for step in steps) else [],
+                ))
+
             if "github.create_pull_request" in tools or "github_create_pull_request" in tools:
                 tool_name = "github.create_pull_request" if "github.create_pull_request" in tools else "github_create_pull_request"
                 steps.append(ExecutionStep(
-                    id="3",
+                    id="4",
                     tool=tool_name,
                     arguments={
                         "repo": extracted_params.get("repo", ""),
@@ -329,7 +919,7 @@ OUTPUT FORMAT:
                         "base": "main",
                     },
                     description="Create pull request",
-                    depends_on=["2"],
+                    depends_on=["3"] if commit_tool_name else ["2"],
                 ))
 
         elif detected_workflow == "connect_all":
