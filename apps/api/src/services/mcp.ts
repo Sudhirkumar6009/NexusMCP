@@ -49,6 +49,56 @@ const METHOD_ALIASES: Record<string, string> = {
   github_create_pull_request: "github.createPullRequest",
   "github.create_branch": "github.createBranch",
   github_create_branch: "github.createBranch",
+  "slack.send_message": "slack.sendMessage",
+  slack_send_message: "slack.sendMessage",
+  "slack.post_message": "slack.sendMessage",
+  slack_post_message: "slack.sendMessage",
+  "slack.list_channels": "slack.getChannels",
+  "slack.get_channels": "slack.getChannels",
+  slack_get_channels: "slack.getChannels",
+  "slack.send_dm": "slack.sendDirectMessage",
+  slack_send_dm: "slack.sendDirectMessage",
+  "slack.post_dm": "slack.sendDirectMessage",
+  slack_post_dm: "slack.sendDirectMessage",
+  "slack.create_channel": "slack.createChannel",
+  slack_create_channel: "slack.createChannel",
+  "slack.update_message": "slack.updateMessage",
+  slack_update_message: "slack.updateMessage",
+  "google_sheets.read_sheet": "sheets.readRange",
+  google_sheets_read_sheet: "sheets.readRange",
+  "google_sheets.read_rows": "sheets.readRange",
+  "sheets.read_range": "sheets.readRange",
+  sheets_read_range: "sheets.readRange",
+  "sheets.read_sheet": "sheets.readRange",
+  sheets_read: "sheets.readRange",
+  "google_sheets.append_rows": "sheets.appendRow",
+  "google_sheets.append_row": "sheets.appendRow",
+  "google_sheets.insert_row": "sheets.appendRow",
+  "sheets.append_row": "sheets.appendRow",
+  sheets_append_row: "sheets.appendRow",
+  "sheets.insert_row": "sheets.appendRow",
+  "google_sheets.update_cells": "sheets.updateCells",
+  "google_sheets.update_row": "sheets.updateCells",
+  "sheets.update_cells": "sheets.updateCells",
+  sheets_update_cells: "sheets.updateCells",
+  "sheets.update_row": "sheets.updateCells",
+  sheets_update_row: "sheets.updateCells",
+  "gmail.list_messages": "gmail.listMessages",
+  gmail_list_messages: "gmail.listMessages",
+  "gmail.search_messages": "gmail.listMessages",
+  gmail_search_messages: "gmail.listMessages",
+  "gmail.read_messages": "gmail.listMessages",
+  gmail_read_messages: "gmail.listMessages",
+  "gmail.send_message": "gmail.sendMessage",
+  gmail_send_message: "gmail.sendMessage",
+  "gmail.send_email": "gmail.sendMessage",
+  gmail_send_email: "gmail.sendMessage",
+  "gmail.send_mail": "gmail.sendMessage",
+  gmail_send_mail: "gmail.sendMessage",
+  "gmail.create_draft": "gmail.createDraft",
+  gmail_create_draft: "gmail.createDraft",
+  "gmail.draft_message": "gmail.createDraft",
+  gmail_draft_message: "gmail.createDraft",
 };
 
 const registeredGateways: Record<string, GatewayRegistration> = {
@@ -123,25 +173,25 @@ function isPlaceholderValue(raw: string | undefined): boolean {
   }
 
   const normalized = raw.trim().toLowerCase();
-  
+
   // Only reject actual placeholder patterns like <field_name> or {field_name}
   // Do NOT reject valid values like "repo", "repository", "issue" - these could be actual names
   if (normalized.length === 0) {
     return true;
   }
-  
+
   // Match placeholder patterns: <something> or {something} or [something]
   const placeholderPattern = /^[<\[{][^<>\[\]{}]+[>\]}]$/;
   if (placeholderPattern.test(normalized)) {
     return true;
   }
-  
+
   // Match template variable patterns like {{variable}} or ${variable}
   const templatePattern = /^(\$\{|\{\{)[^{}]+(\}|\}\})$/;
   if (templatePattern.test(normalized)) {
     return true;
   }
-  
+
   return false;
 }
 
@@ -172,24 +222,28 @@ function getConnectedIntegration(service: "jira" | "github"): Integration {
 }
 
 // New: Check if integration is connected without throwing
-function isIntegrationConnected(service: "jira" | "github" | "slack" | "sheets"): boolean {
+function isIntegrationConnected(
+  service: "jira" | "github" | "slack" | "sheets" | "google_sheets" | "gmail",
+): boolean {
   const integrationMap: Record<string, string> = {
     jira: "int-jira",
     github: "int-github",
     slack: "int-slack",
-    sheets: "int-google_sheets",
+    sheets: "int-google-sheets",
+    google_sheets: "int-google-sheets",
+    gmail: "int-gmail",
   };
-  
+
   const integrationId = integrationMap[service];
   if (!integrationId) return false;
-  
+
   const integration = dataStore.getIntegration(integrationId);
   return integration?.status === "connected";
 }
 
 // New: Get list of all connected integrations
 function getConnectedServices(): string[] {
-  const services = ["jira", "github", "slack", "sheets"] as const;
+  const services = ["jira", "github", "slack", "sheets", "gmail"] as const;
   return services.filter((svc) => isIntegrationConnected(svc));
 }
 
@@ -782,6 +836,247 @@ const handlers: Record<string, MCPHandler> = {
         { id: "C003", name: "bugs" },
         { id: "C004", name: "notifications" },
       ],
+    };
+  },
+
+  "slack.createChannel": async (params) => {
+    await simulateDelay(120, 280);
+    const payload = params as JsonRecord;
+    const name =
+      pickString(payload, ["name", "channel", "channel_name"]) ||
+      "workflow-updates";
+    const isPrivate = Boolean(payload.is_private ?? payload.isPrivate ?? false);
+
+    dataStore.addLog({
+      level: "info",
+      service: "slack",
+      action: "create_channel",
+      message: `Created Slack channel ${name}`,
+      details: { name, isPrivate },
+    });
+
+    return {
+      ok: true,
+      channel: {
+        id: `C${Math.floor(Math.random() * 9000) + 1000}`,
+        name,
+        is_private: isPrivate,
+      },
+    };
+  },
+
+  "slack.sendDirectMessage": async (params) => {
+    await simulateDelay(100, 250);
+    const payload = params as JsonRecord;
+    const user =
+      pickString(payload, ["user", "user_id", "recipient"]) || "unknown-user";
+    const text =
+      pickString(payload, ["text", "message", "body"]) || "NexusMCP update";
+    const ts = `${Date.now()}.${Math.floor(Math.random() * 1000000)}`;
+
+    dataStore.addLog({
+      level: "info",
+      service: "slack",
+      action: "send_dm",
+      message: `Sent DM to ${user}`,
+      details: { user, textPreview: text.substring(0, 50) },
+    });
+
+    return { ok: true, ts, user };
+  },
+
+  "slack.updateMessage": async (params) => {
+    await simulateDelay(100, 250);
+    const payload = params as JsonRecord;
+    const channel = pickString(payload, ["channel"]) || "general";
+    const timestamp =
+      pickString(payload, ["timestamp", "ts"]) || `${Date.now()}`;
+    const text =
+      pickString(payload, ["text", "message", "body"]) ||
+      "Updated from NexusMCP";
+
+    dataStore.addLog({
+      level: "info",
+      service: "slack",
+      action: "update_message",
+      message: `Updated Slack message in ${channel}`,
+      details: { channel, timestamp, textPreview: text.substring(0, 50) },
+    });
+
+    return {
+      ok: true,
+      channel,
+      ts: timestamp,
+      text,
+    };
+  },
+
+  "sheets.readRange": async (params) => {
+    await simulateDelay(80, 220);
+    const payload = params as JsonRecord;
+    const sheetId =
+      pickString(payload, [
+        "sheet_id",
+        "spreadsheetId",
+        "spreadsheet_id",
+        "sheetId",
+      ]) || "sheet-demo";
+    const range = pickString(payload, ["range"]) || "A1:D10";
+
+    dataStore.addLog({
+      level: "info",
+      service: "system",
+      action: "sheets_read_range",
+      message: `Read range ${range} from ${sheetId}`,
+      details: { sheetId, range },
+    });
+
+    return {
+      sheet_id: sheetId,
+      range,
+      values: [
+        ["timestamp", "event", "status"],
+        [new Date().toISOString(), "workflow", "ok"],
+      ],
+    };
+  },
+
+  "sheets.appendRow": async (params) => {
+    await simulateDelay(90, 220);
+    const payload = params as JsonRecord;
+    const sheetId =
+      pickString(payload, [
+        "sheet_id",
+        "spreadsheetId",
+        "spreadsheet_id",
+        "sheetId",
+      ]) || "sheet-demo";
+    const sheetName =
+      pickString(payload, ["sheet_name", "tab", "sheet"]) || "Sheet1";
+    const rowData = payload.row_data ?? payload.values ?? [];
+
+    dataStore.addLog({
+      level: "info",
+      service: "system",
+      action: "sheets_append_row",
+      message: `Appended row to ${sheetId}/${sheetName}`,
+      details: { sheetId, sheetName },
+    });
+
+    const rowNumber = Math.floor(Math.random() * 200) + 2;
+    return {
+      updatedRange: `${sheetName}!A${rowNumber}:D${rowNumber}`,
+      sheet_id: sheetId,
+      sheet_name: sheetName,
+      values: rowData,
+    };
+  },
+
+  "sheets.updateCells": async (params) => {
+    await simulateDelay(90, 220);
+    const payload = params as JsonRecord;
+    const sheetId =
+      pickString(payload, [
+        "sheet_id",
+        "spreadsheetId",
+        "spreadsheet_id",
+        "sheetId",
+      ]) || "sheet-demo";
+    const range = pickString(payload, ["range"]) || "A1";
+    const values = payload.values ?? [];
+
+    dataStore.addLog({
+      level: "info",
+      service: "system",
+      action: "sheets_update_cells",
+      message: `Updated cells in ${sheetId} (${range})`,
+      details: { sheetId, range },
+    });
+
+    return {
+      sheet_id: sheetId,
+      range,
+      updatedCells: Array.isArray(values) ? values.length : 1,
+    };
+  },
+
+  "gmail.listMessages": async (params) => {
+    await simulateDelay(80, 200);
+    const payload = params as JsonRecord;
+    const query =
+      pickString(payload, ["query", "q"]) || "in:inbox newer_than:7d";
+    const maxResultsRaw = Number(
+      payload.max_results ?? payload.maxResults ?? 20,
+    );
+    const maxResults = Number.isFinite(maxResultsRaw)
+      ? Math.max(1, Math.min(100, maxResultsRaw))
+      : 20;
+
+    dataStore.addLog({
+      level: "info",
+      service: "system",
+      action: "gmail_list_messages",
+      message: `Listed Gmail messages with query: ${query}`,
+      details: { query, maxResults },
+    });
+
+    return {
+      query,
+      messages: Array.from({ length: Math.min(maxResults, 3) }, (_, index) => ({
+        id: `msg-${Date.now()}-${index + 1}`,
+        subject: `Sample message ${index + 1}`,
+        from: "noreply@example.com",
+      })),
+    };
+  },
+
+  "gmail.sendMessage": async (params) => {
+    await simulateDelay(90, 220);
+    const payload = params as JsonRecord;
+    const to =
+      pickString(payload, ["to", "recipient", "email"]) ||
+      "unknown@example.com";
+    const subject =
+      pickString(payload, ["subject", "title"]) || "NexusMCP Update";
+    const body = pickString(payload, ["body", "text", "message"]) || "";
+
+    dataStore.addLog({
+      level: "info",
+      service: "system",
+      action: "gmail_send_message",
+      message: `Sent email to ${to}`,
+      details: { to, subject, bodyPreview: body.substring(0, 80) },
+    });
+
+    return {
+      id: `gmail-${Date.now()}`,
+      to,
+      subject,
+      accepted: true,
+    };
+  },
+
+  "gmail.createDraft": async (params) => {
+    await simulateDelay(90, 220);
+    const payload = params as JsonRecord;
+    const to =
+      pickString(payload, ["to", "recipient", "email"]) ||
+      "unknown@example.com";
+    const subject =
+      pickString(payload, ["subject", "title"]) || "Draft from NexusMCP";
+
+    dataStore.addLog({
+      level: "info",
+      service: "system",
+      action: "gmail_create_draft",
+      message: `Created Gmail draft for ${to}`,
+      details: { to, subject },
+    });
+
+    return {
+      id: `draft-${Date.now()}`,
+      to,
+      subject,
     };
   },
 

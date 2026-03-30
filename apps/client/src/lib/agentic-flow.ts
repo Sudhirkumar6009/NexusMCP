@@ -67,6 +67,46 @@ const SERVICE_IDS: ServiceId[] = [
   "aws",
 ];
 
+const SERVICE_TOKEN_TO_ID: Record<string, ServiceId> = {
+  jira: "jira",
+  slack: "slack",
+  github: "github",
+  google_sheets: "google_sheets",
+  googlesheets: "google_sheets",
+  sheets: "google_sheets",
+  sheet: "google_sheets",
+  gmail: "gmail",
+  google_mail: "gmail",
+  googlemail: "gmail",
+  mail: "gmail",
+  aws: "aws",
+};
+
+function normalizeServiceToken(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^int[-_]/, "")
+    .replace(/[\s-]+/g, "_");
+}
+
+function canonicalServiceIdFromToken(value: string): ServiceId | null {
+  const normalized = normalizeServiceToken(value);
+  const compact = normalized.replace(/_/g, "");
+
+  if (SERVICE_TOKEN_TO_ID[normalized]) {
+    return SERVICE_TOKEN_TO_ID[normalized];
+  }
+
+  if (SERVICE_TOKEN_TO_ID[compact]) {
+    return SERVICE_TOKEN_TO_ID[compact];
+  }
+
+  return SERVICE_IDS.includes(normalized as ServiceId)
+    ? (normalized as ServiceId)
+    : null;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -145,13 +185,25 @@ function toExecutionSteps(plan: AgentFlowPlan): ToolExecutionStep[] {
 }
 
 function toServiceIdFromTool(toolName: string): ServiceId | null {
-  const serviceCandidate = toolName.includes(".")
-    ? toolName.split(".", 1)[0]
-    : toolName.split("_", 1)[0];
+  const normalizedTool = toolName.trim().toLowerCase().replace(/-/g, "_");
+  const orderedTokens = Object.keys(SERVICE_TOKEN_TO_ID).sort(
+    (left, right) => right.length - left.length,
+  );
 
-  return SERVICE_IDS.includes(serviceCandidate as ServiceId)
-    ? (serviceCandidate as ServiceId)
-    : null;
+  for (const token of orderedTokens) {
+    if (
+      normalizedTool.startsWith(`${token}.`) ||
+      normalizedTool.startsWith(`${token}_`)
+    ) {
+      return SERVICE_TOKEN_TO_ID[token];
+    }
+  }
+
+  const serviceCandidate = normalizedTool.includes(".")
+    ? normalizedTool.split(".", 1)[0]
+    : normalizedTool.split("_", 1)[0];
+
+  return canonicalServiceIdFromToken(serviceCandidate);
 }
 
 function normalizedPrompt(prompt: string): string {
@@ -633,10 +685,7 @@ export async function executeAgentFlow(args: {
       return null;
     }
 
-    const normalized = serviceId.trim().toLowerCase().replace(/^int-/, "");
-    return SERVICE_IDS.includes(normalized as ServiceId)
-      ? (normalized as ServiceId)
-      : null;
+    return canonicalServiceIdFromToken(serviceId);
   };
 
   const getIntegrationForService = (

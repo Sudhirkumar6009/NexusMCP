@@ -33,6 +33,12 @@ const initialIntegrations: Integration[] = [
         requiresApproval: false,
       },
       {
+        name: "get_issue",
+        description: "Get Jira issue details by key",
+        inputSchema: {},
+        requiresApproval: false,
+      },
+      {
         name: "update_issue",
         description: "Update an existing issue",
         inputSchema: {},

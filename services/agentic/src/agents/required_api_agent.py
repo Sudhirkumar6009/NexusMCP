@@ -439,6 +439,7 @@ class RequiredAPIAgent(BaseAgent):
         prompt: str,
     ) -> RequiredAPIResult:
         """Validate and enrich the result with connectivity info."""
+        heuristic_result = self._heuristic_detection(prompt, integrations)
         excluded_ids = self._extract_excluded_services(prompt, integrations)
         explicit_ids = self._extract_explicit_services(prompt, integrations, excluded_ids)
         include_all = self._has_all_connectors_directive(prompt)
@@ -452,6 +453,12 @@ class RequiredAPIAgent(BaseAgent):
             for service in result.required_services
             if service.service_id in available_id_set
         }
+
+        for service in heuristic_result.required_services:
+            if service.service_id not in available_id_set:
+                continue
+            if service.service_id not in existing_map:
+                existing_map[service.service_id] = service
 
         if include_all or (connector_status_query and not explicit_ids):
             required_ids = [
@@ -467,12 +474,9 @@ class RequiredAPIAgent(BaseAgent):
             ]
 
             if explicit_ids:
-                explicit_set = set(explicit_ids)
-                required_ids = [
-                    service_id for service_id in required_ids if service_id in explicit_set
-                ]
-                if not required_ids:
-                    required_ids = explicit_ids
+                for service_id in explicit_ids:
+                    if service_id not in required_ids and service_id not in excluded_ids:
+                        required_ids.append(service_id)
 
         inferred_actions = self._infer_actions_from_prompt(prompt)
 
@@ -509,6 +513,10 @@ class RequiredAPIAgent(BaseAgent):
             )
 
         result.required_services = required_services
+
+        for key, value in heuristic_result.extracted_params.items():
+            if key not in result.extracted_params and value:
+                result.extracted_params[key] = value
 
         # Extract additional params if missing
         if not result.extracted_params:

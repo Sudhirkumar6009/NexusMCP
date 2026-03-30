@@ -121,10 +121,9 @@ class ContextAnalysisAgent(BaseAgent):
                 if service_id in available_ids and service_id not in excluded_ids
             ]
             if explicit_ids:
-                explicit_id_set = set(explicit_ids)
-                filtered_ids = [
-                    service_id for service_id in filtered_ids if service_id in explicit_id_set
-                ]
+                for service_id in explicit_ids:
+                    if service_id not in filtered_ids and service_id not in excluded_ids:
+                        filtered_ids.append(service_id)
             elif keyword_ids:
                 keyword_id_set = set(keyword_ids)
                 filtered_ids = [
@@ -150,6 +149,14 @@ class ContextAnalysisAgent(BaseAgent):
                 filtered_ids = explicit_ids
             elif keyword_ids:
                 filtered_ids = keyword_ids
+
+        if filtered_ids and not include_all and not explicit_ids and keyword_ids:
+            keyword_set = set(keyword_ids)
+            for integration in integrations:
+                if integration.id in excluded_ids:
+                    continue
+                if integration.id in keyword_set and integration.id not in filtered_ids:
+                    filtered_ids.append(integration.id)
 
         connector_reasoning: Dict[str, str] = {}
         for service_id in filtered_ids:

@@ -154,26 +154,240 @@ const TOOL_INPUT_FALLBACKS: Record<string, Record<string, string>> = {
   "github.get_repository": {
     repo: "string",
   },
+  "slack.send_message": {
+    channel: "string",
+    text: "string",
+  },
+  "slack.sendmessage": {
+    channel: "string",
+    text: "string",
+  },
+  "slack.send_dm": {
+    user: "string",
+    text: "string",
+  },
+  "slack.senddirectmessage": {
+    user: "string",
+    text: "string",
+  },
+  "slack.create_channel": {
+    name: "string",
+    is_private: "boolean",
+  },
+  "slack.createchannel": {
+    name: "string",
+    is_private: "boolean",
+  },
+  "slack.update_message": {
+    channel: "string",
+    timestamp: "string",
+    text: "string",
+  },
+  "slack.updatemessage": {
+    channel: "string",
+    timestamp: "string",
+    text: "string",
+  },
+  "slack.list_channels": {},
+  "slack.getchannels": {},
+  "slack.list_users": {},
+  "google_sheets.read_sheet": {
+    sheet_id: "string",
+    range: "string",
+  },
+  "google_sheets.append_rows": {
+    sheet_id: "string",
+    sheet_name: "string",
+    row_data: "array",
+  },
+  "google_sheets.append_row": {
+    sheet_id: "string",
+    sheet_name: "string",
+    row_data: "array",
+  },
+  "google_sheets.update_cells": {
+    sheet_id: "string",
+    range: "string",
+    values: "array",
+  },
+  "sheets.read_range": {
+    sheet_id: "string",
+    range: "string",
+  },
+  "sheets.read_sheet": {
+    sheet_id: "string",
+    range: "string",
+  },
+  "sheets.append_row": {
+    sheet_id: "string",
+    sheet_name: "string",
+    row_data: "array",
+  },
+  "sheets.update_cells": {
+    sheet_id: "string",
+    range: "string",
+    values: "array",
+  },
+  "gmail.list_messages": {
+    query: "string",
+    max_results: "number",
+  },
+  "gmail.listmessages": {
+    query: "string",
+    max_results: "number",
+  },
+  "gmail.search_messages": {
+    query: "string",
+    max_results: "number",
+  },
+  "gmail.send_message": {
+    to: "string",
+    subject: "string",
+    body: "string",
+  },
+  "gmail.sendmessage": {
+    to: "string",
+    subject: "string",
+    body: "string",
+  },
+  "gmail.send_email": {
+    to: "string",
+    subject: "string",
+    body: "string",
+  },
+  "gmail.create_draft": {
+    to: "string",
+    subject: "string",
+    body: "string",
+  },
+  "gmail.createdraft": {
+    to: "string",
+    subject: "string",
+    body: "string",
+  },
 };
 
 function getToolNameVariants(serviceId: ServiceId, toolName: string): string[] {
-  const variants = new Set<string>([toolName]);
+  const normalizedToolName = toolName.trim();
+  const variants = new Set<string>([
+    normalizedToolName,
+    normalizedToolName.replace(".", "_"),
+  ]);
+
+  const addVariants = (...names: string[]) => {
+    for (const name of names) {
+      const normalized = name.trim();
+      if (normalized) {
+        variants.add(normalized);
+      }
+    }
+  };
 
   if (serviceId === "github") {
-    if (toolName.endsWith(".create_pr")) {
-      variants.add(`${serviceId}.create_pull_request`);
+    if (normalizedToolName.endsWith(".create_pr")) {
+      addVariants(
+        `${serviceId}.create_pull_request`,
+        "github.createPullRequest",
+      );
     }
-    if (toolName.endsWith(".create_pull_request")) {
-      variants.add(`${serviceId}.create_pr`);
+    if (normalizedToolName.endsWith(".create_pull_request")) {
+      addVariants(`${serviceId}.create_pr`, "github.createPullRequest");
+    }
+    if (normalizedToolName.endsWith(".create_branch")) {
+      addVariants("github.createBranch");
     }
   }
 
   if (serviceId === "jira") {
-    if (toolName.endsWith(".search_issues")) {
-      variants.add(`${serviceId}.get_issues`);
+    if (normalizedToolName.endsWith(".search_issues")) {
+      addVariants(
+        `${serviceId}.get_issues`,
+        `${serviceId}_search`,
+        "jira.getIssues",
+      );
     }
-    if (toolName.endsWith(".get_issues")) {
-      variants.add(`${serviceId}.search_issues`);
+    if (normalizedToolName.endsWith(".get_issues")) {
+      addVariants(
+        `${serviceId}.search_issues`,
+        `${serviceId}_search`,
+        "jira.getIssues",
+      );
+    }
+    if (normalizedToolName.endsWith(".get_issue")) {
+      addVariants("jira.getIssue", "jira_get_issue");
+    }
+    if (normalizedToolName.endsWith(".create_issue")) {
+      addVariants("jira.createIssue", "jira_create_issue");
+    }
+    if (normalizedToolName.endsWith(".update_issue")) {
+      addVariants("jira.updateIssue", "jira_update_issue");
+    }
+  }
+
+  if (serviceId === "slack") {
+    if (normalizedToolName.endsWith(".send_message")) {
+      addVariants(
+        "slack.sendMessage",
+        "slack.post_message",
+        "slack_post_message",
+      );
+    }
+    if (normalizedToolName.endsWith(".list_channels")) {
+      addVariants(
+        "slack.getChannels",
+        "slack.get_channels",
+        "slack_get_channels",
+      );
+    }
+    if (normalizedToolName.endsWith(".send_dm")) {
+      addVariants("slack.sendDirectMessage", "slack.post_dm", "slack_post_dm");
+    }
+    if (normalizedToolName.endsWith(".create_channel")) {
+      addVariants("slack.createChannel", "slack_create_channel");
+    }
+    if (normalizedToolName.endsWith(".update_message")) {
+      addVariants("slack.updateMessage", "slack_update_message");
+    }
+  }
+
+  if (serviceId === "google_sheets") {
+    if (normalizedToolName.endsWith(".read_sheet")) {
+      addVariants(
+        "google_sheets.read_rows",
+        "sheets.read_range",
+        "sheets_read_range",
+        "sheets.read_sheet",
+      );
+    }
+    if (normalizedToolName.endsWith(".append_rows")) {
+      addVariants(
+        "google_sheets.append_row",
+        "sheets.append_row",
+        "sheets_append_row",
+      );
+    }
+    if (normalizedToolName.endsWith(".update_cells")) {
+      addVariants("sheets.update_cells", "sheets_update_cells");
+    }
+  }
+
+  if (serviceId === "gmail") {
+    if (normalizedToolName.endsWith(".send_message")) {
+      addVariants("gmail.send_email", "gmail_send_email", "gmail.sendMessage");
+    }
+    if (normalizedToolName.endsWith(".list_messages")) {
+      addVariants(
+        "gmail.search_messages",
+        "gmail_search_messages",
+        "gmail.listMessages",
+      );
+    }
+    if (normalizedToolName.endsWith(".search_messages")) {
+      addVariants(
+        "gmail.list_messages",
+        "gmail_list_messages",
+        "gmail.listMessages",
+      );
     }
   }
 
