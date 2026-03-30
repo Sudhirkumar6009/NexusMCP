@@ -10,6 +10,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ class NodeResult:
     node_id: str
     status: NodeStatus
     output: Any = None
+    resolved_arguments: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
@@ -102,6 +104,7 @@ class DAGExecutor:
             execution_id=execution_id,
             workflow_id=workflow_id,
         )
+        shared_context = self._initialize_context(context)
         
         # Build execution layers (topological sort)
         layers = self._build_execution_layers(nodes, edges)
@@ -113,7 +116,7 @@ class DAGExecutor:
             
             # Execute all nodes in layer in parallel
             tasks = [
-                self._execute_node(node, state, context or {})
+                self._execute_node(node, state, shared_context)
                 for node in layer_nodes
             ]
             
@@ -140,6 +143,13 @@ class DAGExecutor:
                         had_failures = True
                         if self.fail_fast:
                             break
+
+                    if result.status == NodeStatus.SUCCESS:
+                        self._persist_step_output(
+                            context=shared_context,
+                            node=node,
+                            result=result,
+                        )
                     
                     # Check for approval gate
                     if result.status == NodeStatus.WAITING_APPROVAL:
@@ -168,10 +178,15 @@ class DAGExecutor:
         node_id = node["id"]
         node_type = node.get("type", "action")
         tool_name = node.get("tool")
+        resolved_node = self._resolve_node_templates(node, context)
+        resolved_arguments = resolved_node.get("arguments")
         
         result = NodeResult(
             node_id=node_id,
             status=NodeStatus.RUNNING,
+            resolved_arguments=resolved_arguments
+            if isinstance(resolved_arguments, dict)
+            else {},
             started_at=datetime.utcnow(),
         )
         
@@ -188,7 +203,7 @@ class DAGExecutor:
                 if tool_name and tool_name in self._tool_handlers:
                     handler = self._tool_handlers[tool_name]
                     output = await asyncio.wait_for(
-                        handler(node, context),
+                        handler(resolved_node, context),
                         timeout=self.node_timeout,
                     )
                     result.output = output
@@ -216,6 +231,147 @@ class DAGExecutor:
             
         result.completed_at = datetime.utcnow()
         return result
+
+    def _initialize_context(self, context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        base_context = dict(context or {})
+        existing_nested_context = base_context.get("context")
+        nested_context = (
+            dict(existing_nested_context)
+            if isinstance(existing_nested_context, dict)
+            else {}
+        )
+
+        timestamp_value = base_context.get("timestamp")
+        if timestamp_value is None:
+            timestamp_value = int(datetime.utcnow().timestamp())
+
+        shared_context: Dict[str, Any] = {
+            **base_context,
+            "input": {k: v for k, v in base_context.items() if k != "context"},
+            "context": nested_context,
+            "timestamp": timestamp_value,
+        }
+        return shared_context
+
+    def _resolve_node_templates(
+        self,
+        node: Dict[str, Any],
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        resolved_node = dict(node)
+
+        if isinstance(node.get("arguments"), dict):
+            resolved_node["arguments"] = self._resolve_templates(
+                node["arguments"],
+                context,
+            )
+
+        config = node.get("config")
+        if isinstance(config, dict):
+            resolved_config = dict(config)
+            if isinstance(config.get("inputs"), dict):
+                resolved_config["inputs"] = self._resolve_templates(
+                    config["inputs"],
+                    context,
+                )
+            else:
+                resolved_config = self._resolve_templates(config, context)
+            resolved_node["config"] = resolved_config
+
+        return resolved_node
+
+    def _resolve_templates(self, value: Any, context: Dict[str, Any]) -> Any:
+        if isinstance(value, str):
+            return self._resolve_template_string(value, context)
+        if isinstance(value, dict):
+            return {k: self._resolve_templates(v, context) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._resolve_templates(item, context) for item in value]
+        return value
+
+    def _resolve_template_string(self, value: str, context: Dict[str, Any]) -> Any:
+        pattern = r"\{\{\s*([^{}]+?)\s*\}\}"
+
+        full_match = re.fullmatch(pattern, value)
+        if full_match:
+            looked_up = self._lookup_context_value(full_match.group(1), context)
+            return looked_up if looked_up is not None else value
+
+        def _replace(match: re.Match[str]) -> str:
+            expression = match.group(1)
+            looked_up = self._lookup_context_value(expression, context)
+            if looked_up is None:
+                return match.group(0)
+            return str(looked_up)
+
+        return re.sub(pattern, _replace, value)
+
+    def _lookup_context_value(self, expression: str, context: Dict[str, Any]) -> Any:
+        tokens = [token for token in expression.strip().split(".") if token]
+        if not tokens:
+            return None
+
+        current: Any = context
+        for token in tokens:
+            if isinstance(current, dict) and token in current:
+                current = current[token]
+                continue
+            return None
+
+        return current
+
+    def _persist_step_output(
+        self,
+        context: Dict[str, Any],
+        node: Dict[str, Any],
+        result: NodeResult,
+    ) -> None:
+        node_output = self._normalize_output_payload(
+            result.output,
+            result.resolved_arguments,
+        )
+
+        output_key = None
+        if isinstance(node.get("output_key"), str) and node["output_key"].strip():
+            output_key = node["output_key"].strip()
+        elif isinstance(node.get("config"), dict):
+            config_output_key = node["config"].get("output_key")
+            if isinstance(config_output_key, str) and config_output_key.strip():
+                output_key = config_output_key.strip()
+
+        step_id = str(node.get("id", ""))
+        context_bucket = context.setdefault("context", {})
+        if isinstance(context_bucket, dict):
+            if output_key:
+                context_bucket[output_key] = node_output
+                context[output_key] = node_output
+            if step_id:
+                context_bucket[step_id] = node_output
+                context[step_id] = node_output
+
+    def _normalize_output_payload(
+        self,
+        output: Any,
+        resolved_arguments: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        normalized: Dict[str, Any]
+        if isinstance(output, dict):
+            normalized = dict(output)
+        else:
+            normalized = {"value": output}
+
+        if "branch" in normalized and "branch_name" not in normalized:
+            normalized["branch_name"] = normalized["branch"]
+
+        resolved_branch_name = resolved_arguments.get("branch_name")
+        if (
+            isinstance(resolved_branch_name, str)
+            and resolved_branch_name
+            and "branch_name" not in normalized
+        ):
+            normalized["branch_name"] = resolved_branch_name
+
+        return normalized
 
     def _build_execution_layers(
         self,

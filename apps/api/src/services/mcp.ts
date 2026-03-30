@@ -1473,6 +1473,7 @@ const handlers: Record<string, MCPHandler> = {
 
         return {
           branch,
+          branch_name: branch,
           base,
           repo,
           existed: true,
@@ -1505,6 +1506,7 @@ const handlers: Record<string, MCPHandler> = {
 
     return {
       branch,
+      branch_name: branch,
       base,
       repo,
       existed: false,
