@@ -355,15 +355,20 @@ export function createAgentFlowPlan(
   const endId = `end-${planId}`;
 
   // Check which services are connected vs disconnected
-  const connectedServices = targetIntegrations.filter(i => i.status === "connected");
-  const disconnectedServices = targetIntegrations.filter(i => i.status !== "connected");
+  const connectedServices = targetIntegrations.filter(
+    (i) => i.status === "connected",
+  );
+  const disconnectedServices = targetIntegrations.filter(
+    (i) => i.status !== "connected",
+  );
 
   const connectorSteps = targetIntegrations.map((integration, index) => ({
     id: `connector-${integration.id}-${index}-${planId}`,
     label: `${integration.name} Agent`,
-    description: integration.status === "connected" 
-      ? `Execute ${integration.name} connector operations in parallel`
-      : `${integration.name} - NOT CONNECTED (connect first)`,
+    description:
+      integration.status === "connected"
+        ? `Execute ${integration.name} connector operations in parallel`
+        : `${integration.name} - NOT CONNECTED (connect first)`,
     phase: "connector-agent" as const,
     level: 3,
     serviceId: integration.id,
@@ -389,9 +394,10 @@ export function createAgentFlowPlan(
     {
       id: requiredApiId,
       label: "Required API Check",
-      description: disconnectedServices.length > 0
-        ? `Need to connect: ${disconnectedServices.map(i => i.name).join(", ")}`
-        : `All ${targetIntegrations.length} required services ready`,
+      description:
+        disconnectedServices.length > 0
+          ? `Need to connect: ${disconnectedServices.map((i) => i.name).join(", ")}`
+          : `All ${targetIntegrations.length} required services ready`,
       phase: "required-api",
       level: 2,
     },
@@ -622,17 +628,73 @@ export async function executeAgentFlow(args: {
     integration: Integration,
   ) => Promise<"connected" | "cancelled" | "failed">;
 }): Promise<AgentRunState> {
+  const toCanonicalServiceId = (serviceId?: string): ServiceId | null => {
+    if (!serviceId) {
+      return null;
+    }
+
+    const normalized = serviceId.trim().toLowerCase().replace(/^int-/, "");
+    return SERVICE_IDS.includes(normalized as ServiceId)
+      ? (normalized as ServiceId)
+      : null;
+  };
+
+  const getIntegrationForService = (
+    serviceId?: string,
+  ): Integration | undefined => {
+    const canonicalId = toCanonicalServiceId(serviceId);
+    if (!canonicalId) {
+      return undefined;
+    }
+
+    return (
+      args.getCurrentIntegration?.(canonicalId) ??
+      args.integrations.find((item) => item.id === canonicalId)
+    );
+  };
+
   const startStep = args.plan.steps.find((step) => step.phase === "start");
   const contextStep = args.plan.steps.find(
     (step) => step.phase === "context-analysis",
   );
-  const requiredApiStep = args.plan.steps.find(
+  const requiredApiSteps = args.plan.steps.filter(
     (step) => step.phase === "required-api",
   );
   const orchestratorStep = args.plan.steps.find(
     (step) => step.phase === "orchestrator",
   );
   const endStep = args.plan.steps.find((step) => step.phase === "end");
+  const connectorSteps = args.plan.steps.filter(
+    (step) => step.phase === "connector-agent",
+  );
+
+  const connectorStepByService = new Map<ServiceId, AgentFlowStep>();
+  for (const step of connectorSteps) {
+    const canonicalServiceId = toCanonicalServiceId(step.serviceId);
+    if (canonicalServiceId && !connectorStepByService.has(canonicalServiceId)) {
+      connectorStepByService.set(canonicalServiceId, step);
+    }
+  }
+
+  const requiredApiStepByService = new Map<ServiceId, AgentFlowStep>();
+  const summaryRequiredApiSteps: AgentFlowStep[] = [];
+  for (const step of requiredApiSteps) {
+    const canonicalServiceId = toCanonicalServiceId(step.serviceId);
+    if (
+      canonicalServiceId &&
+      !requiredApiStepByService.has(canonicalServiceId)
+    ) {
+      requiredApiStepByService.set(canonicalServiceId, step);
+      continue;
+    }
+
+    summaryRequiredApiSteps.push(step);
+  }
+
+  const servicesToValidate =
+    requiredApiStepByService.size > 0
+      ? Array.from(requiredApiStepByService.keys())
+      : Array.from(connectorStepByService.keys());
 
   if (!startStep || !contextStep || !orchestratorStep || !endStep) {
     return "failed";
@@ -660,7 +722,7 @@ export async function executeAgentFlow(args: {
   });
 
   if (contextResult !== "done") {
-    if (requiredApiStep) {
+    for (const requiredApiStep of requiredApiSteps) {
       args.onStatusUpdate({
         nodeId: requiredApiStep.id,
         status: "failed",
@@ -680,83 +742,206 @@ export async function executeAgentFlow(args: {
     return contextResult;
   }
 
-  // Handle Required API step
-  if (requiredApiStep) {
-    // Check if there are any disconnected services
-    const connectorSteps = args.plan.steps.filter(
-      (step) => step.phase === "connector-agent",
-    );
-    
-    const disconnectedServices = connectorSteps.filter((step) => {
-      const integration = step.serviceId 
-        ? args.getCurrentIntegration?.(step.serviceId as ServiceId) ?? 
-          args.integrations.find((i) => i.id === step.serviceId)
-        : null;
-      return !integration || integration.status !== "connected";
-    });
+  const connectionOutcomes = new Map<
+    ServiceId,
+    {
+      result: "connected" | "cancelled" | "failed";
+      detail: string;
+    }
+  >();
 
-    args.onStatusUpdate({
-      nodeId: requiredApiStep.id,
-      status: "working",
-      detail: "Checking required API connectivity...",
-    });
-
-    await sleep(randomBetween(400, 700));
-
-    if (disconnectedServices.length > 0) {
-      const disconnectedNames = disconnectedServices
-        .map((s) => s.serviceName || s.serviceId)
-        .join(", ");
-      
+  if (requiredApiSteps.length > 0) {
+    for (const summaryStep of summaryRequiredApiSteps) {
       args.onStatusUpdate({
-        nodeId: requiredApiStep.id,
-        status: "failed",
-        detail: `Missing connections: ${disconnectedNames}. Please connect these integrations first.`,
+        nodeId: summaryStep.id,
+        status: "working",
+        detail: "Checking required API connectivity...",
       });
+    }
 
-      // Mark all connector steps as failed
-      for (const step of connectorSteps) {
+    for (const serviceId of servicesToValidate) {
+      if (isAbort(args.signal)) {
+        return "stopped";
+      }
+
+      const requiredStep = requiredApiStepByService.get(serviceId);
+      const connectorStep = connectorStepByService.get(serviceId);
+      const integration = getIntegrationForService(serviceId);
+      const serviceName =
+        requiredStep?.serviceName ||
+        connectorStep?.serviceName ||
+        integration?.name ||
+        serviceId;
+
+      if (!integration) {
+        const detail = `${serviceName} is not available in this workspace.`;
+        connectionOutcomes.set(serviceId, {
+          result: "failed",
+          detail,
+        });
+
+        if (requiredStep) {
+          args.onStatusUpdate({
+            nodeId: requiredStep.id,
+            status: "failed",
+            detail,
+          });
+        }
+        continue;
+      }
+
+      if (integration.status === "connected") {
+        const detail = `${integration.name} API key is connected.`;
+        connectionOutcomes.set(serviceId, {
+          result: "connected",
+          detail,
+        });
+
+        if (requiredStep) {
+          args.onStatusUpdate({
+            nodeId: requiredStep.id,
+            status: "done",
+            detail,
+          });
+        }
+        continue;
+      }
+
+      if (requiredStep) {
         args.onStatusUpdate({
-          nodeId: step.id,
-          status: "failed",
-          detail: "Blocked - service not connected",
+          nodeId: requiredStep.id,
+          status: "waiting",
+          detail: `${integration.name} is missing API credentials. Waiting for connection...`,
         });
       }
 
+      if (!args.resolveConnectorConnection) {
+        const detail = `${integration.name} is not connected and no connection prompt is available.`;
+        connectionOutcomes.set(serviceId, {
+          result: "failed",
+          detail,
+        });
+
+        if (requiredStep) {
+          args.onStatusUpdate({
+            nodeId: requiredStep.id,
+            status: "failed",
+            detail,
+          });
+        }
+        continue;
+      }
+
+      if (requiredStep) {
+        args.onStatusUpdate({
+          nodeId: requiredStep.id,
+          status: "working",
+          detail: `Opening ${integration.name} connection popup...`,
+        });
+      }
+
+      const resolution = await args.resolveConnectorConnection(integration);
+
+      if (isAbort(args.signal)) {
+        return "stopped";
+      }
+
+      if (resolution !== "connected") {
+        const detail =
+          resolution === "cancelled"
+            ? `${integration.name} connection was cancelled.`
+            : `Failed to connect ${integration.name}.`;
+        connectionOutcomes.set(serviceId, {
+          result: resolution,
+          detail,
+        });
+
+        if (requiredStep) {
+          args.onStatusUpdate({
+            nodeId: requiredStep.id,
+            status: "failed",
+            detail,
+          });
+        }
+        continue;
+      }
+
+      const refreshedIntegration =
+        getIntegrationForService(serviceId) ?? integration;
+      const detail = `${refreshedIntegration.name} connected successfully.`;
+      connectionOutcomes.set(serviceId, {
+        result: "connected",
+        detail,
+      });
+
+      if (requiredStep) {
+        args.onStatusUpdate({
+          nodeId: requiredStep.id,
+          status: "done",
+          detail,
+        });
+      }
+    }
+
+    if (summaryRequiredApiSteps.length > 0) {
+      const connectedCount = servicesToValidate.filter(
+        (serviceId) =>
+          connectionOutcomes.get(serviceId)?.result === "connected",
+      ).length;
+
+      const unresolvedServices = servicesToValidate.filter(
+        (serviceId) =>
+          connectionOutcomes.get(serviceId)?.result !== "connected",
+      );
+
+      const summaryStatus = unresolvedServices.length > 0 ? "failed" : "done";
+      const summaryDetail =
+        servicesToValidate.length === 0
+          ? "No connector API checks required."
+          : unresolvedServices.length > 0
+            ? `${connectedCount}/${servicesToValidate.length} required connectors are connected. Remaining connectors need setup.`
+            : `All required connectors are connected (${connectedCount}).`;
+
+      for (const summaryStep of summaryRequiredApiSteps) {
+        args.onStatusUpdate({
+          nodeId: summaryStep.id,
+          status: summaryStatus,
+          detail: summaryDetail,
+        });
+      }
+    }
+  }
+
+  if (isAbort(args.signal)) {
+    return "stopped";
+  }
+
+  if (connectorSteps.length === 0 && servicesToValidate.length > 0) {
+    const unresolvedServices = servicesToValidate.filter(
+      (serviceId) => connectionOutcomes.get(serviceId)?.result !== "connected",
+    );
+
+    if (unresolvedServices.length > 0) {
       args.onStatusUpdate({
         nodeId: orchestratorStep.id,
         status: "failed",
-        detail: "Flow blocked - required services not connected",
+        detail: "Required connectors are still waiting for API credentials.",
       });
       args.onStatusUpdate({
         nodeId: endStep.id,
         status: "failed",
-        detail: "Flow terminated",
+        detail: "Flow blocked",
       });
-
       return "blocked";
     }
-
-    args.onStatusUpdate({
-      nodeId: requiredApiStep.id,
-      status: "done",
-      detail: `All required services connected (${connectorSteps.length} services)`,
-    });
   }
-
-  const connectorSteps = args.plan.steps.filter(
-    (step) => step.phase === "connector-agent",
-  );
 
   const executionSteps = toExecutionSteps(args.plan);
   const readyConnectorSteps = new Map<
     ServiceId,
     { integration: Integration; nodeId: string }
   >();
-
-  let branchFailureDetected = false;
-  let failedConnectorNodeId: string | null = null;
-  const failedConnectors: string[] = []; // Track which connectors failed
+  const failedConnectorNodeIds = new Set<string>();
 
   for (const step of connectorSteps) {
     if (isAbort(args.signal)) {
@@ -778,15 +963,15 @@ export async function executeAgentFlow(args: {
       return "stopped";
     }
 
-    const serviceId = step.serviceId;
-    const integration =
-      (serviceId && args.getCurrentIntegration?.(serviceId as ServiceId)) ??
-      args.integrations.find((item) => item.id === serviceId);
+    const serviceId = toCanonicalServiceId(step.serviceId);
+    const integration = getIntegrationForService(serviceId ?? step.serviceId);
+    const requiredOutcome = serviceId
+      ? connectionOutcomes.get(serviceId)
+      : undefined;
 
     if (!integration) {
       // Track failure but don't cascade to other connectors
-      failedConnectors.push(step.id);
-      failedConnectorNodeId = step.id;
+      failedConnectorNodeIds.add(step.id);
       args.onStatusUpdate({
         nodeId: step.id,
         status: "failed",
@@ -797,8 +982,7 @@ export async function executeAgentFlow(args: {
 
     const unavailableReason = connectorUnavailableReason(integration);
     if (unavailableReason) {
-      failedConnectors.push(step.id);
-      failedConnectorNodeId = step.id;
+      failedConnectorNodeIds.add(step.id);
       args.onStatusUpdate({
         nodeId: step.id,
         status: "failed",
@@ -812,12 +996,21 @@ export async function executeAgentFlow(args: {
       integration,
     });
     if (forcedFailureReason) {
-      failedConnectors.push(step.id);
-      failedConnectorNodeId = step.id;
+      failedConnectorNodeIds.add(step.id);
       args.onStatusUpdate({
         nodeId: step.id,
         status: "failed",
         detail: forcedFailureReason,
+      });
+      continue;
+    }
+
+    if (requiredOutcome && requiredOutcome.result !== "connected") {
+      failedConnectorNodeIds.add(step.id);
+      args.onStatusUpdate({
+        nodeId: step.id,
+        status: "failed",
+        detail: requiredOutcome.detail,
       });
       continue;
     }
@@ -841,13 +1034,12 @@ export async function executeAgentFlow(args: {
 
     args.onStatusUpdate({
       nodeId: step.id,
-      status: "working",
+      status: "waiting",
       detail: `${integration.name} not connected. Waiting for credentials...`,
     });
 
     if (!args.resolveConnectorConnection) {
-      failedConnectors.push(step.id);
-      failedConnectorNodeId = step.id;
+      failedConnectorNodeIds.add(step.id);
       args.onStatusUpdate({
         nodeId: step.id,
         status: "failed",
@@ -863,23 +1055,38 @@ export async function executeAgentFlow(args: {
     }
 
     if (resolution !== "connected") {
-      failedConnectors.push(step.id);
-      failedConnectorNodeId = step.id;
+      failedConnectorNodeIds.add(step.id);
+
+      const detail =
+        resolution === "cancelled"
+          ? `Credentials modal closed for ${integration.name}`
+          : `Failed to connect ${integration.name}`;
+
+      if (serviceId) {
+        connectionOutcomes.set(serviceId, {
+          result: resolution,
+          detail,
+        });
+      }
+
       args.onStatusUpdate({
         nodeId: step.id,
         status: "failed",
-        detail:
-          resolution === "cancelled"
-            ? `Credentials modal closed for ${integration.name}`
-            : `Failed to connect ${integration.name}`,
+        detail,
       });
       continue;
     }
 
     const refreshedIntegration =
-      (serviceId
-        ? args.getCurrentIntegration?.(serviceId as ServiceId)
-        : undefined) ?? integration;
+      (serviceId ? getIntegrationForService(serviceId) : undefined) ??
+      integration;
+
+    if (serviceId) {
+      connectionOutcomes.set(serviceId, {
+        result: "connected",
+        detail: `${refreshedIntegration.name} connected successfully.`,
+      });
+    }
 
     readyConnectorSteps.set(refreshedIntegration.id, {
       integration: refreshedIntegration,
@@ -902,16 +1109,17 @@ export async function executeAgentFlow(args: {
 
   // Check if ALL connectors failed (total failure) vs some failed (partial success possible)
   const hasReadyConnectors = readyConnectorSteps.size > 0;
-  const allConnectorsFailed = failedConnectors.length === connectorSteps.length;
-  
-  // Only set branchFailureDetected if ALL connectors failed
-  if (allConnectorsFailed && connectorSteps.length > 0) {
-    branchFailureDetected = true;
-  }
+  const allConnectorsFailed =
+    connectorSteps.length > 0 &&
+    connectorSteps.every((step) => failedConnectorNodeIds.has(step.id));
 
-  if (!branchFailureDetected && hasReadyConnectors) {
+  if (hasReadyConnectors) {
     if (executionSteps.length === 0) {
       for (const connectorState of Array.from(readyConnectorSteps.values())) {
+        if (failedConnectorNodeIds.has(connectorState.nodeId)) {
+          continue;
+        }
+
         args.onStatusUpdate({
           nodeId: connectorState.nodeId,
           status: "done",
@@ -937,7 +1145,7 @@ export async function executeAgentFlow(args: {
             request: executionStep.arguments,
             error: `Unable to resolve connector from tool ${executionStep.tool}`,
           });
-          
+
           // Only mark as failed if this is a critical tool
           continue;
         }
@@ -953,7 +1161,7 @@ export async function executeAgentFlow(args: {
             request: executionStep.arguments,
             error: `Connector ${serviceId} is not connected for tool execution`,
           });
-          
+
           continue;
         }
 
@@ -987,8 +1195,7 @@ export async function executeAgentFlow(args: {
           executionResponse.data.error
         ) {
           // Track execution failure but continue with other tools if possible
-          failedConnectors.push(connectorState.nodeId);
-          failedConnectorNodeId = connectorState.nodeId;
+          failedConnectorNodeIds.add(connectorState.nodeId);
 
           const failureDetail =
             executionResponse.error ||
@@ -1033,26 +1240,28 @@ export async function executeAgentFlow(args: {
         });
       }
 
-      if (!branchFailureDetected) {
-        for (const [serviceId, connectorState] of Array.from(
-          readyConnectorSteps.entries(),
-        )) {
-          const count = executionCount.get(serviceId) ?? 0;
-          args.onStatusUpdate({
-            nodeId: connectorState.nodeId,
-            status: "done",
-            detail:
-              count > 0
-                ? `Executed ${count} tool call${count === 1 ? "" : "s"} on ${connectorState.integration.name}`
-                : `${connectorState.integration.name} connected successfully`,
-          });
+      for (const [serviceId, connectorState] of Array.from(
+        readyConnectorSteps.entries(),
+      )) {
+        if (failedConnectorNodeIds.has(connectorState.nodeId)) {
+          continue;
         }
+
+        const count = executionCount.get(serviceId) ?? 0;
+        args.onStatusUpdate({
+          nodeId: connectorState.nodeId,
+          status: "done",
+          detail:
+            count > 0
+              ? `Executed ${count} tool call${count === 1 ? "" : "s"} on ${connectorState.integration.name}`
+              : `${connectorState.integration.name} connected successfully`,
+        });
       }
     }
   }
 
   // Only fail the entire flow if ALL connectors failed (no partial success)
-  if (branchFailureDetected && !hasReadyConnectors) {
+  if (allConnectorsFailed && !hasReadyConnectors) {
     args.onStatusUpdate({
       nodeId: orchestratorStep.id,
       status: "failed",

@@ -225,13 +225,8 @@ class FlowManager:
         """Create the default 5-step flow while blocked on required connector APIs."""
         start_id = f"{plan_id}-start"
         context_id = f"{plan_id}-context"
-        required_id = f"{plan_id}-required-api"
         execution_id = f"{plan_id}-execution"
         end_id = f"{plan_id}-end"
-
-        required_names = ", ".join(
-            service.service_name for service in required_api.required_services
-        )
 
         steps = [
             AgentFlowStep(
@@ -248,15 +243,6 @@ class FlowManager:
                 phase="context-analysis",
                 level=1,
             ),
-            AgentFlowStep(
-                id=required_id,
-                label="CONNECTOR API KEY CHECK",
-                description=(
-                    f"Requires: {required_names}" if required_names else "No connector API key required"
-                ),
-                phase="required-api",
-                level=2,
-            ),
         ]
 
         edges: list[AgentFlowEdge] = [
@@ -264,38 +250,37 @@ class FlowManager:
                 id=f"edge-{start_id}-{context_id}",
                 source=start_id,
                 target=context_id,
-            ),
-            AgentFlowEdge(
-                id=f"edge-{context_id}-{required_id}",
-                source=context_id,
-                target=required_id,
-            ),
+            )
         ]
 
-        connector_node_ids: list[str] = []
+        api_check_ids: list[str] = []
 
-        # Add steps for each required service
+        # Add per-service API key check steps.
         for service in required_api.required_services:
             status = "connected" if service.is_connected else "not connected"
-            connector_id = f"{plan_id}-svc-{service.service_id}"
+            safe_service_id = "".join(
+                ch if ch.isalnum() or ch in "-_" else "-"
+                for ch in service.service_id
+            )
+            api_check_id = f"{plan_id}-api-{safe_service_id}"
             steps.append(
                 AgentFlowStep(
-                    id=connector_id,
-                    label=service.service_name,
+                    id=api_check_id,
+                    label=f"{service.service_name} API KEY CHECK",
                     description=f"{service.reason} ({status})",
-                    phase="connector-agent",
-                    level=3,
+                    phase="required-api",
+                    level=2,
                     serviceId=service.service_id,
                     serviceName=service.service_name,
                     status="done" if service.is_connected else "failed",
                 )
             )
-            connector_node_ids.append(connector_id)
+            api_check_ids.append(api_check_id)
             edges.append(
                 AgentFlowEdge(
-                    id=f"edge-{required_id}-{connector_id}",
-                    source=required_id,
-                    target=connector_id,
+                    id=f"edge-{context_id}-{api_check_id}",
+                    source=context_id,
+                    target=api_check_id,
                 )
             )
 
@@ -310,20 +295,20 @@ class FlowManager:
             )
         )
 
-        if connector_node_ids:
-            for connector_id in connector_node_ids:
+        if api_check_ids:
+            for api_check_id in api_check_ids:
                 edges.append(
                     AgentFlowEdge(
-                        id=f"edge-{connector_id}-{execution_id}",
-                        source=connector_id,
+                        id=f"edge-{api_check_id}-{execution_id}",
+                        source=api_check_id,
                         target=execution_id,
                     )
                 )
         else:
             edges.append(
                 AgentFlowEdge(
-                    id=f"edge-{required_id}-{execution_id}",
-                    source=required_id,
+                    id=f"edge-{context_id}-{execution_id}",
+                    source=context_id,
                     target=execution_id,
                 )
             )

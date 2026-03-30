@@ -54,7 +54,7 @@ const phaseTheme: Record<
 const statusLabel: Record<AgentFlowNodeData["status"], string> = {
   waiting: "WAITING",
   working: "WORKING",
-  done: "DONE WORKING",
+  done: "DONE",
   failed: "ERROR / FAILED",
 };
 

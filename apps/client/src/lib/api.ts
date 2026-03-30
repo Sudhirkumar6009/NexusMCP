@@ -27,6 +27,13 @@ interface PaginatedResponse<T> {
   };
 }
 
+interface GmailOAuthTokenResponse {
+  access_token: string;
+  refresh_token: string;
+  expires_in: number;
+  error?: string;
+}
+
 async function fetchApi<T>(
   endpoint: string,
   options: RequestInit = {},
@@ -124,10 +131,7 @@ export const workflowsApi = {
       signal,
     }),
 
-  smartExecute: (
-    payload: SmartExecutionPayload,
-    signal?: AbortSignal,
-  ) =>
+  smartExecute: (payload: SmartExecutionPayload, signal?: AbortSignal) =>
     fetchApi<SmartExecutionResult>("/workflows/smart-execute", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -226,6 +230,58 @@ export const authApi = {
       body: JSON.stringify({ email, password }),
     }),
 
+  fetchGmailOAuthToken: async (): Promise<GmailOAuthTokenResponse> => {
+    const token =
+      typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
+
+    const response = await fetch(`${API_BASE_URL}/auth/gmail/token`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      credentials: "include",
+      body: JSON.stringify({}),
+    });
+
+    const responseText = await response.text();
+    let payload: Partial<GmailOAuthTokenResponse> = {};
+
+    try {
+      payload = responseText
+        ? (JSON.parse(responseText) as Partial<GmailOAuthTokenResponse>)
+        : {};
+    } catch {
+      throw new Error(
+        responseText || `Failed to fetch Gmail token (${response.status})`,
+      );
+    }
+
+    if (!response.ok) {
+      throw new Error(
+        payload.error ||
+          `Failed to fetch Gmail token (${response.status} ${response.statusText})`,
+      );
+    }
+
+    const accessToken =
+      typeof payload.access_token === "string" ? payload.access_token : "";
+    if (!accessToken) {
+      throw new Error("Gmail token response did not include access_token");
+    }
+
+    return {
+      access_token: accessToken,
+      refresh_token:
+        typeof payload.refresh_token === "string" ? payload.refresh_token : "",
+      expires_in:
+        typeof payload.expires_in === "number" &&
+        Number.isFinite(payload.expires_in)
+          ? payload.expires_in
+          : 3600,
+    };
+  },
+
   logout: () => fetchApi<void>("/auth/logout", { method: "POST" }),
 };
 
@@ -262,7 +318,15 @@ export const mcpApi = {
 };
 
 // Type definitions (shared with server)
-type ServiceType = "jira" | "slack" | "github" | "postgres" | "sheets" | "google_sheets" | "gmail" | "aws";
+type ServiceType =
+  | "jira"
+  | "slack"
+  | "github"
+  | "postgres"
+  | "sheets"
+  | "google_sheets"
+  | "gmail"
+  | "aws";
 
 interface DAGNode {
   id: string;

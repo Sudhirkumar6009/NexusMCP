@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { createHmac, createHash, createSign } from "crypto";
 import { dataStore } from "../data/store.js";
+import { User, IUser } from "../models/User.js";
 
 const router = Router();
 
@@ -24,6 +25,137 @@ function toSafeIntegration<T extends { credentials?: unknown }>(
     ...integration,
     credentials: integration.credentials ? { configured: true } : undefined,
   };
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function parseExpiresInSeconds(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.floor(value);
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.floor(parsed);
+    }
+  }
+
+  return 3600;
+}
+
+function looksLikeNexusAuthToken(token: string): boolean {
+  const parts = token.split(".");
+  if (parts.length !== 3) {
+    return false;
+  }
+
+  try {
+    const payloadText = Buffer.from(parts[1], "base64url").toString("utf8");
+    const payload = JSON.parse(payloadText) as Record<string, unknown>;
+
+    return (
+      typeof payload.userId === "string" &&
+      typeof payload.email === "string" &&
+      typeof payload.role === "string"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function getGoogleOAuthClientCredentials() {
+  const clientId =
+    process.env.GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT || "";
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET || "";
+
+  return {
+    clientId,
+    clientSecret,
+  };
+}
+
+async function exchangeGoogleRefreshToken(refreshToken: string) {
+  const { clientId, clientSecret } = getGoogleOAuthClientCredentials();
+
+  if (!clientId || !clientSecret) {
+    throw new Error(
+      "Google OAuth client credentials are not configured on the server",
+    );
+  }
+
+  const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: "refresh_token",
+    }).toString(),
+  });
+
+  const tokenText = await tokenResponse.text();
+  let tokenPayload: Record<string, unknown> = {};
+
+  try {
+    tokenPayload = tokenText
+      ? (JSON.parse(tokenText) as Record<string, unknown>)
+      : {};
+  } catch {
+    throw new Error(
+      `Google token refresh failed (${tokenResponse.status}): ${tokenText}`,
+    );
+  }
+
+  if (!tokenResponse.ok) {
+    throw new Error(
+      `Google token refresh failed (${tokenResponse.status}): ${String(tokenPayload.error_description || tokenPayload.error || tokenResponse.statusText)}`,
+    );
+  }
+
+  const accessToken = normalizeOptionalString(tokenPayload.access_token);
+  if (!accessToken) {
+    throw new Error("Google token refresh succeeded but no access_token found");
+  }
+
+  return {
+    accessToken,
+    expiresIn: parseExpiresInSeconds(tokenPayload.expires_in),
+  };
+}
+
+async function loadUserGoogleOAuthState(
+  userId?: string,
+): Promise<IUser | null> {
+  if (!userId) {
+    return null;
+  }
+
+  return (await User.findById(userId).select(
+    "+googleAccessToken +googleRefreshToken +googleAccessTokenExpiresAt",
+  )) as IUser | null;
+}
+
+async function persistUserGoogleAccessToken(
+  user: IUser,
+  accessToken: string,
+  expiresInSeconds: number,
+) {
+  user.googleAccessToken = accessToken;
+  user.googleAccessTokenExpiresAt = new Date(
+    Date.now() + Math.max(expiresInSeconds - 60, 60) * 1000,
+  );
+  await user.save();
 }
 
 async function validateJiraCredentials(credentials: Record<string, unknown>) {
@@ -401,39 +533,117 @@ async function validateGoogleSheetsCredentials(
   };
 }
 
-async function validateGmailCredentials(credentials: Record<string, unknown>) {
-  const accessToken =
-    (typeof credentials.accessToken === "string" &&
-      credentials.accessToken.trim()) ||
-    (typeof credentials.apiKey === "string" && credentials.apiKey.trim()) ||
-    process.env.GMAIL_ACCESS_TOKEN;
+async function validateGmailCredentials(
+  credentials: Record<string, unknown>,
+  userId?: string,
+) {
+  let accessToken =
+    normalizeOptionalString(credentials.accessToken) ||
+    normalizeOptionalString(credentials.apiKey);
+  const explicitRefreshToken = normalizeOptionalString(
+    credentials.refreshToken,
+  );
+  const envAccessToken = normalizeOptionalString(
+    process.env.GMAIL_ACCESS_TOKEN,
+  );
 
-  if (!accessToken) {
-    throw new Error("Gmail access token is required");
+  if (accessToken && looksLikeNexusAuthToken(accessToken)) {
+    throw new Error(
+      "Detected a Nexus auth JWT (from /auth/callback?token=...) instead of a Google OAuth access token. Use /auth/google/gmail or leave Gmail token blank so the server uses your saved Google OAuth tokens.",
+    );
   }
 
-  const response = await fetch(
-    "https://gmail.googleapis.com/gmail/v1/users/me/profile",
-    {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
-    },
-  );
+  const oauthUser = await loadUserGoogleOAuthState(userId);
+  let refreshToken =
+    explicitRefreshToken ||
+    normalizeOptionalString(oauthUser?.googleRefreshToken);
+  accessToken =
+    accessToken ||
+    normalizeOptionalString(oauthUser?.googleAccessToken) ||
+    envAccessToken;
+
+  const userTokenExpired =
+    !!oauthUser?.googleAccessTokenExpiresAt &&
+    oauthUser.googleAccessTokenExpiresAt.getTime() <= Date.now();
+
+  if ((!accessToken || userTokenExpired) && refreshToken) {
+    const refreshed = await exchangeGoogleRefreshToken(refreshToken);
+    accessToken = refreshed.accessToken;
+
+    if (oauthUser) {
+      await persistUserGoogleAccessToken(
+        oauthUser,
+        refreshed.accessToken,
+        refreshed.expiresIn,
+      );
+    }
+  }
+
+  if (!accessToken) {
+    throw new Error(
+      "No Gmail OAuth access token found. Sign in through /auth/google/gmail or provide a valid Google OAuth access token.",
+    );
+  }
+
+  const fetchTokenInfo = (token: string) =>
+    fetch(
+      `https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(token)}`,
+    );
+
+  let response = await fetchTokenInfo(accessToken);
+
+  if ((response.status === 400 || response.status === 401) && refreshToken) {
+    const refreshed = await exchangeGoogleRefreshToken(refreshToken);
+    accessToken = refreshed.accessToken;
+
+    if (oauthUser) {
+      await persistUserGoogleAccessToken(
+        oauthUser,
+        refreshed.accessToken,
+        refreshed.expiresIn,
+      );
+    }
+
+    response = await fetchTokenInfo(accessToken);
+  }
 
   if (!response.ok) {
     const body = await response.text();
     throw new Error(`Gmail validation failed (${response.status}): ${body}`);
   }
 
-  const profile = (await response.json()) as Record<string, unknown>;
+  const tokenInfo = (await response.json()) as Record<string, unknown>;
+  const scopeText = normalizeOptionalString(tokenInfo.scope) || "";
+  const grantedScopes = scopeText
+    .split(/\s+/)
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+
+  const scopeSet = new Set(grantedScopes);
+  const hasSendScope =
+    scopeSet.has("https://www.googleapis.com/auth/gmail.send") ||
+    scopeSet.has("https://mail.google.com/");
+
+  if (!hasSendScope) {
+    throw new Error(
+      "Gmail OAuth token is missing gmail.send scope. Re-authorize via /auth/google/gmail and grant Gmail access.",
+    );
+  }
+
   return {
     credentials: {
       accessToken,
+      ...(explicitRefreshToken ? { refreshToken: explicitRefreshToken } : {}),
     },
     metadata: {
-      emailAddress: profile.emailAddress,
-      messagesTotal: profile.messagesTotal,
+      emailAddress: normalizeOptionalString(tokenInfo.email),
+      grantedScopes,
+      validationMode: "tokeninfo",
+      tokenAudience:
+        normalizeOptionalString(tokenInfo.audience) ||
+        normalizeOptionalString(tokenInfo.aud),
+      expiresIn: parseExpiresInSeconds(tokenInfo.expires_in),
+      authSource: oauthUser ? "user_oauth" : "provided_token",
     },
   };
 }
@@ -571,6 +781,9 @@ async function validateAwsCredentials(credentials: Record<string, unknown>) {
 async function validateProvider(
   service: string,
   credentials: Record<string, unknown>,
+  options?: {
+    userId?: string;
+  },
 ) {
   if (service === "jira") {
     const jira = await validateJiraCredentials(credentials);
@@ -600,7 +813,7 @@ async function validateProvider(
   }
 
   if (service === "gmail") {
-    return validateGmailCredentials(credentials);
+    return validateGmailCredentials(credentials, options?.userId);
   }
 
   if (service === "aws") {
@@ -659,8 +872,11 @@ router.post("/:id/connect", async (req, res) => {
       string,
       unknown
     >;
+    const userId = (req as { userId?: string }).userId;
 
-    const validated = await validateProvider(integration.service, credentials);
+    const validated = await validateProvider(integration.service, credentials, {
+      userId,
+    });
     const connected = dataStore.connectIntegration(id, validated.credentials);
 
     if (!connected) {
@@ -752,9 +968,13 @@ router.post("/:id/test", async (req, res) => {
   }
 
   try {
+    const userId = (req as { userId?: string }).userId;
     const validated = await validateProvider(
       integration.service,
       (integration.credentials ?? {}) as Record<string, unknown>,
+      {
+        userId,
+      },
     );
 
     dataStore.addLog({

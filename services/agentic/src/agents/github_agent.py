@@ -67,7 +67,14 @@ class GitHubAgent(BaseAgent):
         "create_branch": ["github.create_branch", "github_create_branch", "create_branch"],
         "create_file": ["github.create_file", "github_create_file", "create_file", "github.commit_file"],
         "update_file": ["github.update_file", "github_update_file", "update_file"],
-        "create_pull_request": ["github.create_pull_request", "github_create_pull_request", "create_pull_request", "github.create_pr"],
+        "create_pull_request": [
+            "github.create_pull_request",
+            "github_create_pull_request",
+            "create_pull_request",
+            "github.create_pr",
+            "github_create_pr",
+            "create_pr",
+        ],
         "get_pull_request": ["github.get_pull_request", "github_get_pull_request", "get_pr"],
         "merge_pull_request": ["github.merge_pull_request", "github_merge_pull_request", "merge_pr"],
     }

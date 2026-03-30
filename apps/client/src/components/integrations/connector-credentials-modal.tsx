@@ -4,6 +4,7 @@ import React, { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Modal, ModalFooter } from "@/components/ui/modal";
 import { Input } from "@/components/ui/input";
+import { authApi } from "@/lib/api";
 import type {
   Integration,
   IntegrationCredentials,
@@ -58,11 +59,19 @@ export function ConnectorCredentialsModal({
   const [submitError, setSubmitError] = useState("");
   const [scopes, setScopes] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isFetchingGmailToken, setIsFetchingGmailToken] = useState(false);
 
   const isJira = integration?.id === "jira";
   const isGitHub = integration?.id === "github";
   const isGoogleSheets = integration?.id === "google_sheets";
+  const isGmail = integration?.id === "gmail";
   const isAws = integration?.id === "aws";
+
+  const gmailOAuthUrl = `${(
+    process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000/api"
+  )
+    .replace(/\/$/, "")
+    .replace(/\/api$/, "")}/auth/google/gmail`;
 
   const handleGoogleCredentialsFile = async (
     event: React.ChangeEvent<HTMLInputElement>,
@@ -115,14 +124,47 @@ export function ConnectorCredentialsModal({
     setAwsRegion("us-east-1");
     setScopes([]);
     setSubmitError("");
+    setIsFetchingGmailToken(false);
   };
 
   const handleClose = () => {
-    if (isLoading) {
+    if (isLoading || isFetchingGmailToken) {
       return;
     }
     resetForm();
     onClose();
+  };
+
+  const handleAutoFetchGmailToken = async () => {
+    setSubmitError("");
+    setIsFetchingGmailToken(true);
+
+    try {
+      const tokenResponse = await authApi.fetchGmailOAuthToken();
+      setApiKey(tokenResponse.access_token);
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : "Failed to fetch Gmail OAuth token";
+
+      const needsReauthorization =
+        errorMessage.includes(
+          "authorization_code is required when no refresh_token exists",
+        ) ||
+        errorMessage.includes(
+          "Google did not return refresh_token. Re-authorize with access_type=offline and prompt=consent.",
+        );
+
+      if (needsReauthorization && typeof window !== "undefined") {
+        window.location.href = gmailOAuthUrl;
+        return;
+      }
+
+      setSubmitError(errorMessage);
+    } finally {
+      setIsFetchingGmailToken(false);
+    }
   };
 
   const handleSave = async () => {
@@ -145,7 +187,7 @@ export function ConnectorCredentialsModal({
       } else if (isGoogleSheets) {
         credentials.googleServiceAccountJson = googleServiceAccountJson;
         credentials.spreadsheetId = spreadsheetId;
-      } else if (integration.id === "gmail") {
+      } else if (isGmail) {
         credentials.accessToken = apiKey;
       } else if (isAws) {
         credentials.accessKeyId = awsAccessKeyId;
@@ -174,10 +216,10 @@ export function ConnectorCredentialsModal({
     !integration ||
     (isJira && (!apiKey || !jiraEmail || !jiraBaseUrl)) ||
     (isGoogleSheets && (!googleServiceAccountJson || !spreadsheetId)) ||
-    (integration?.id === "gmail" && !apiKey) ||
     (integration?.id === "slack" && !apiKey) ||
     (integration?.id === "github" && !apiKey) ||
-    (isAws && (!awsAccessKeyId || !awsSecretAccessKey || !awsRegion));
+    (isAws && (!awsAccessKeyId || !awsSecretAccessKey || !awsRegion)) ||
+    isFetchingGmailToken;
 
   return (
     <Modal
@@ -188,22 +230,45 @@ export function ConnectorCredentialsModal({
       size="md"
     >
       <div className="space-y-4">
-        {!isAws && !isGoogleSheets && (
+        {!isAws && !isGoogleSheets && !isGmail && (
           <Input
             label={
               isJira
                 ? "Jira API Token"
                 : isGitHub
                   ? "GitHub Personal Access Token"
-                  : integration?.id === "gmail"
-                    ? "Gmail OAuth Access Token"
-                    : "Access Token"
+                  : "Access Token"
             }
             type="password"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
             placeholder="Enter credentials used for provider ping"
           />
+        )}
+
+        {isGmail && (
+          <div className="space-y-2">
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                isLoading={isFetchingGmailToken}
+                disabled={isLoading}
+                onClick={() => {
+                  void handleAutoFetchGmailToken();
+                }}
+              >
+                Auto Fetch Gmail Token
+              </Button>
+            </div>
+            <p className="text-xs text-content-tertiary">
+              Do not paste the Nexus token from /auth/callback?token=... here.
+              That token authenticates this app, not Gmail API. If a Gmail
+              refresh token is missing, this button redirects you to Google
+              consent automatically. Manual re-authorize URL: {gmailOAuthUrl}.
+            </p>
+          </div>
         )}
 
         {isJira && (

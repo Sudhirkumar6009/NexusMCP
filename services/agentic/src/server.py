@@ -94,8 +94,8 @@ async def default_flow(request: DefaultFlowRequest) -> DefaultFlowResponse:
     │     └─ If missing → return BLOCKED status                   │
     ├─────────────────────────────────────────────────────────────┤
     │  4. EXECUTION FLOW                                          │
-    │     └─ Generate resolution steps using JiraAgent/GitHubAgent│
-    │     └─ Build workflow: get_issue → create_branch → create_pr│
+    │     └─ Generate resolution steps using connector agents      │
+    │     └─ Jira, GitHub, Slack, Google Sheets, Gmail workflows   │
     ├─────────────────────────────────────────────────────────────┤
     │  5. FINAL RESPONSE                                          │
     │     └─ Compile results and return to user                   │

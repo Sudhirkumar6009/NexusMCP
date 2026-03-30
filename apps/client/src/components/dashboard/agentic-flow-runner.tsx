@@ -495,46 +495,6 @@ export function AgenticFlowRunner() {
     setPlan(nextPlan);
     setRuntime(createInitialRuntimeMap(nextPlan));
 
-    // Check if flow is blocked due to missing connections (new streamlined flow)
-    if (nextPlan.readyToExecute === false && nextPlan.blockedReason) {
-      // Flow is blocked - show what services need to be connected
-      setRunState("blocked");
-      
-      // Update runtime to show blocked status on relevant nodes
-      if (nextPlan.requiredApi?.disconnected_services) {
-        for (const step of nextPlan.steps) {
-          if (step.phase === "connector-agent") {
-            const isDisconnected = nextPlan.requiredApi.disconnected_services.includes(
-              step.serviceId || ""
-            );
-            handleStatusUpdate({
-              nodeId: step.id,
-              status: isDisconnected ? "failed" : "waiting",
-              detail: isDisconnected 
-                ? `${step.serviceName || step.serviceId} is not connected. Please connect this integration first.`
-                : "Waiting for other services",
-            });
-          }
-        }
-      }
-      
-      // Log the blocked reason to audit trail
-      setAuditTrail((prev) => [{
-        id: `blocked-${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        nodeId: "required-api",
-        serviceId: "system",
-        tool: "connectivity-check",
-        stage: "error" as const,
-        error: nextPlan.blockedReason ?? "Services not connected",
-      }, ...prev].slice(0, 120));
-      
-      if (abortRef.current === controller) {
-        abortRef.current = null;
-      }
-      return;
-    }
-
     setRunState("running");
 
     const result = await executeAgentFlow({

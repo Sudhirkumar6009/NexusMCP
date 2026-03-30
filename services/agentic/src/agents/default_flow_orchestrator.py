@@ -27,6 +27,9 @@ from ..models import (
 )
 from .jira_agent import JiraAgent, JiraWorkflowPlan
 from .github_agent import GitHubAgent, GitHubWorkflowPlan
+from .slack_agent import SlackAgent, SlackWorkflowPlan
+from .sheets_agent import GoogleSheetsAgent, SheetsWorkflowPlan
+from .gmail_agent import GmailAgent, GmailWorkflowPlan
 
 logger = logging.getLogger(__name__)
 
@@ -155,16 +158,28 @@ class DefaultFlowOrchestrator:
     SERVICE_KEYWORDS = {
         "jira": ["jira", "issue", "ticket", "bug", "task", "story", "epic", "sprint"],
         "github": ["github", "repo", "repository", "branch", "pr", "pull request", "commit", "merge"],
-        "slack": ["slack", "message", "channel", "notify", "notification", "post", "dm"],
-        "sheets": ["sheet", "sheets", "spreadsheet", "google sheet", "row", "cell", "append"],
-        "gmail": ["gmail", "email", "mail", "send email"],
+        "slack": ["slack", "message", "channel", "notify", "notification", "post", "dm", "direct message"],
+        "google_sheets": ["sheet", "sheets", "spreadsheet", "google sheet", "row", "cell", "append", "database", "db", "log"],
+        "gmail": ["gmail", "email", "mail", "send email", "inbox", "draft"],
         "aws": ["aws", "lambda", "s3", "ec2", "cloud"],
+    }
+
+    SERVICE_ALIASES = {
+        "jira": ["jira", "ticket", "issue"],
+        "github": ["github", "gh", "repo", "repository"],
+        "slack": ["slack"],
+        "google_sheets": ["google_sheets", "google-sheets", "google sheets", "sheets", "sheet"],
+        "gmail": ["gmail", "google mail", "email", "mail"],
+        "aws": ["aws", "amazon web services"],
     }
 
     def __init__(self, gemini: GeminiClient):
         self.gemini = gemini
         self.jira_agent = JiraAgent(gemini)
         self.github_agent = GitHubAgent(gemini)
+        self.slack_agent = SlackAgent(gemini)
+        self.sheets_agent = GoogleSheetsAgent(gemini)
+        self.gmail_agent = GmailAgent(gemini)
         self.logs: List[Dict[str, Any]] = []
 
     def _log(self, level: str, step: str, message: str, details: Optional[Dict] = None):
@@ -413,10 +428,14 @@ class DefaultFlowOrchestrator:
         normalized = prompt.lower()
         
         # Detect services
-        detected_services = []
+        detected_services: List[str] = []
+        seen_services = set()
         for service, keywords in self.SERVICE_KEYWORDS.items():
             if any(kw in normalized for kw in keywords):
-                detected_services.append(service)
+                canonical_service = self._canonical_service_id(service)
+                if canonical_service not in seen_services:
+                    detected_services.append(canonical_service)
+                    seen_services.add(canonical_service)
         
         # Extract parameters
         import re
@@ -448,6 +467,30 @@ class DefaultFlowOrchestrator:
         channel_match = re.search(r"#([a-zA-Z0-9_-]+)", prompt)
         if channel_match:
             extracted_params["channel"] = channel_match.group(1)
+
+        # Email address (Gmail)
+        email_match = re.search(
+            r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+            prompt,
+        )
+        if email_match:
+            extracted_params["email"] = email_match.group(0)
+
+        # Sheet identifier / range (Google Sheets)
+        sheet_id_match = re.search(
+            r"(?:sheet|spreadsheet)(?:\s+id)?\s*[:=]?\s*([a-zA-Z0-9_-]{8,})",
+            prompt,
+            re.IGNORECASE,
+        )
+        if sheet_id_match:
+            extracted_params["sheet_id"] = sheet_id_match.group(1)
+
+        sheet_range_match = re.search(
+            r"\b([A-Za-z0-9_]+![A-Z]+\d+:[A-Z]+\d+|[A-Z]+\d+:[A-Z]+\d+)\b",
+            prompt,
+        )
+        if sheet_range_match:
+            extracted_params["sheet_range"] = sheet_range_match.group(1)
         
         # Determine intent using LLM if available
         intent = "general query"
@@ -505,27 +548,32 @@ class DefaultFlowOrchestrator:
         """
         Step 3: Verify required API keys/connections are available.
         """
-        self._log("info", "connector-check", f"Checking connectors for: {required_services}")
-        
-        # Build integration lookup
+        normalized_required: List[str] = []
+        seen_required = set()
+        for service in required_services:
+            canonical_service = self._canonical_service_id(service)
+            if canonical_service not in seen_required:
+                normalized_required.append(canonical_service)
+                seen_required.add(canonical_service)
+
+        self._log("info", "connector-check", f"Checking connectors for: {normalized_required}")
+
+        # Build integration lookup with aliases and normalized forms.
         integration_map: Dict[str, IntegrationInput] = {}
         for integration in integrations:
-            # Map by ID and common aliases
-            integration_map[integration.id] = integration
-            integration_map[integration.id.replace("int-", "")] = integration
-            integration_map[integration.name.lower()] = integration
-        
-        available = []
-        missing = []
+            for lookup_key in self._integration_lookup_keys(integration):
+                integration_map[lookup_key] = integration
+
+        available: List[str] = []
+        missing: List[str] = []
         connector_status: Dict[str, Dict[str, Any]] = {}
-        
-        for service in required_services:
-            # Try to find integration
-            integration = (
-                integration_map.get(service) or
-                integration_map.get(f"int-{service}") or
-                integration_map.get(service.lower())
-            )
+
+        for service in normalized_required:
+            integration: Optional[IntegrationInput] = None
+            for lookup_key in self._service_lookup_keys(service):
+                integration = integration_map.get(lookup_key)
+                if integration:
+                    break
             
             if integration and integration.status == "connected":
                 available.append(service)
@@ -540,14 +588,14 @@ class DefaultFlowOrchestrator:
                 missing.append(service)
                 connector_status[service] = {
                     "id": f"int-{service}",
-                    "name": service.title(),
+                    "name": service.replace("_", " ").title(),
                     "status": integration.status if integration else "not_configured",
                     "available": False,
                     "tools": [],
                     "error": "API key not configured" if not integration else "Not connected",
                 }
-        
-        all_available = len(missing) == 0 or len(required_services) == 0
+
+        all_available = len(missing) == 0 or len(normalized_required) == 0
         
         self._log(
             "info" if all_available else "warn",
@@ -556,7 +604,7 @@ class DefaultFlowOrchestrator:
         )
         
         return ConnectorCheckResult(
-            required_connectors=required_services,
+            required_connectors=normalized_required,
             available_connectors=available,
             missing_connectors=missing,
             all_available=all_available,
@@ -578,77 +626,95 @@ class DefaultFlowOrchestrator:
         self._log("info", "execution-flow", "Generating execution steps...")
         
         steps: List[ExecutionStep] = []
-        step_id = 1
+        next_step_id = 1
+        seen_services = set()
         
         # Generate steps for each detected service
         for service in context.detected_services:
-            if service == "jira":
+            canonical_service = self._canonical_service_id(service)
+            if canonical_service in seen_services:
+                continue
+            seen_services.add(canonical_service)
+
+            if canonical_service == "jira":
                 jira_plan = await self.jira_agent.run(
-                    prompt, 
+                    prompt,
                     available_tools,
                     context.extracted_params,
                 )
-                for op in jira_plan.operations:
-                    tool_name = self.jira_agent.get_tool_name(op.operation, available_tools)
-                    steps.append(ExecutionStep(
-                        id=str(step_id),
-                        tool=tool_name or f"jira.{op.operation}",
-                        service="jira",
-                        operation=op.operation,
-                        arguments=op.arguments,
-                        description=op.description,
-                        depends_on=[str(int(d)) for d in op.depends_on] if op.depends_on else [],
-                    ))
-                    step_id += 1
+                next_step_id = self._append_plan_operations(
+                    steps,
+                    next_step_id,
+                    "jira",
+                    jira_plan,
+                    self.jira_agent.get_tool_name,
+                    available_tools,
+                    "jira",
+                )
                     
-            elif service == "github":
+            elif canonical_service == "github":
                 github_plan = await self.github_agent.run(
                     prompt,
                     available_tools,
                     context.extracted_params,
                 )
-                for op in github_plan.operations:
-                    tool_name = self.github_agent.get_tool_name(op.operation, available_tools)
-                    steps.append(ExecutionStep(
-                        id=str(step_id),
-                        tool=tool_name or f"github.{op.operation}",
-                        service="github",
-                        operation=op.operation,
-                        arguments=op.arguments,
-                        description=op.description,
-                        depends_on=[str(int(d) + step_id - len(github_plan.operations)) for d in op.depends_on] if op.depends_on else [],
-                    ))
-                    step_id += 1
+                next_step_id = self._append_plan_operations(
+                    steps,
+                    next_step_id,
+                    "github",
+                    github_plan,
+                    self.github_agent.get_tool_name,
+                    available_tools,
+                    "github",
+                )
                     
-            elif service == "slack":
-                # Basic Slack operations
-                steps.append(ExecutionStep(
-                    id=str(step_id),
-                    tool="slack.post_message",
-                    service="slack",
-                    operation="post_message",
-                    arguments={
-                        "channel": context.extracted_params.get("channel", "general"),
-                        "message": context.extracted_params.get("message", ""),
-                    },
-                    description="Send Slack notification",
-                ))
-                step_id += 1
+            elif canonical_service == "slack":
+                slack_plan = await self.slack_agent.run(
+                    prompt,
+                    available_tools,
+                    context.extracted_params,
+                )
+                next_step_id = self._append_plan_operations(
+                    steps,
+                    next_step_id,
+                    "slack",
+                    slack_plan,
+                    self.slack_agent.get_tool_name,
+                    available_tools,
+                    "slack",
+                )
                 
-            elif service == "sheets":
-                # Basic Sheets operations
-                steps.append(ExecutionStep(
-                    id=str(step_id),
-                    tool="sheets.append_row",
-                    service="sheets",
-                    operation="append_row",
-                    arguments={
-                        "spreadsheet_id": context.extracted_params.get("spreadsheet_id", ""),
-                        "data": context.extracted_params.get("data", []),
-                    },
-                    description="Append to Google Sheet",
-                ))
-                step_id += 1
+            elif canonical_service == "google_sheets":
+                sheets_plan = await self.sheets_agent.run(
+                    prompt,
+                    available_tools,
+                    context.extracted_params,
+                )
+                next_step_id = self._append_plan_operations(
+                    steps,
+                    next_step_id,
+                    "google_sheets",
+                    sheets_plan,
+                    self.sheets_agent.get_tool_name,
+                    available_tools,
+                    "google_sheets",
+                )
+
+            elif canonical_service == "gmail":
+                gmail_plan = await self.gmail_agent.run(
+                    prompt,
+                    available_tools,
+                    context.extracted_params,
+                )
+                next_step_id = self._append_plan_operations(
+                    steps,
+                    next_step_id,
+                    "gmail",
+                    gmail_plan,
+                    self.gmail_agent.get_tool_name,
+                    available_tools,
+                    "gmail",
+                )
         
         self._log("info", "execution-flow", f"Generated {len(steps)} execution steps")
         
@@ -707,6 +773,138 @@ class DefaultFlowOrchestrator:
     # =========================================================================
     # HELPER METHODS
     # =========================================================================
+    def _normalize_lookup_key(self, value: str) -> str:
+        """Normalize service/integration lookup keys."""
+
+        normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized.startswith("int_"):
+            normalized = normalized[4:]
+        return normalized
+
+    def _canonical_service_id(self, value: str) -> str:
+        """Map aliases to canonical service IDs."""
+
+        normalized = self._normalize_lookup_key(value)
+        for canonical, aliases in self.SERVICE_ALIASES.items():
+            alias_keys = {self._normalize_lookup_key(alias) for alias in aliases}
+            alias_keys.add(self._normalize_lookup_key(canonical))
+            if normalized in alias_keys:
+                return canonical
+        return normalized
+
+    def _service_lookup_keys(self, service: str) -> List[str]:
+        """Return all lookup keys for a service alias set."""
+
+        canonical_service = self._canonical_service_id(service)
+        keys = {self._normalize_lookup_key(canonical_service)}
+        for alias in self.SERVICE_ALIASES.get(canonical_service, []):
+            keys.add(self._normalize_lookup_key(alias))
+        return list(keys)
+
+    def _integration_lookup_keys(self, integration: IntegrationInput) -> List[str]:
+        """Return all lookup keys that can resolve an integration."""
+
+        raw_candidates = [
+            integration.id,
+            integration.id.replace("int-", ""),
+            integration.id.replace("int_", ""),
+            integration.name,
+        ]
+
+        keys = {
+            self._normalize_lookup_key(candidate)
+            for candidate in raw_candidates
+            if candidate
+        }
+
+        canonical_id = self._canonical_service_id(integration.id)
+        keys.add(self._normalize_lookup_key(canonical_id))
+        for alias in self.SERVICE_ALIASES.get(canonical_id, []):
+            keys.add(self._normalize_lookup_key(alias))
+
+        return list(keys)
+
+    def _append_plan_operations(
+        self,
+        target_steps: List[ExecutionStep],
+        next_step_id: int,
+        service: str,
+        workflow_plan: JiraWorkflowPlan | GitHubWorkflowPlan | SlackWorkflowPlan | SheetsWorkflowPlan | GmailWorkflowPlan,
+        get_tool_name: Any,
+        available_tools: Dict[str, ToolDefinition],
+        fallback_prefix: str,
+    ) -> int:
+        """Append operations from an agent workflow plan into execution steps."""
+
+        local_index_to_step_id: Dict[str, str] = {}
+        operation_to_step_id: Dict[str, str] = {}
+
+        for local_index, operation in enumerate(workflow_plan.operations, start=1):
+            step_id = str(next_step_id)
+
+            depends_on = self._resolve_dependencies(
+                operation.depends_on,
+                local_index_to_step_id,
+                operation_to_step_id,
+            )
+
+            tool_name = None
+            if callable(get_tool_name):
+                tool_name = get_tool_name(operation.operation, available_tools)
+
+            target_steps.append(
+                ExecutionStep(
+                    id=step_id,
+                    tool=tool_name or f"{fallback_prefix}.{operation.operation}",
+                    service=service,
+                    operation=operation.operation,
+                    arguments=operation.arguments,
+                    description=operation.description,
+                    depends_on=depends_on,
+                )
+            )
+
+            local_index_to_step_id[str(local_index)] = step_id
+            operation_to_step_id[operation.operation] = step_id
+            operation_to_step_id[operation.operation.lower()] = step_id
+            next_step_id += 1
+
+        return next_step_id
+
+    def _resolve_dependencies(
+        self,
+        dependencies: List[str],
+        local_index_to_step_id: Dict[str, str],
+        operation_to_step_id: Dict[str, str],
+    ) -> List[str]:
+        """Resolve operation dependencies to execution step IDs."""
+
+        resolved: List[str] = []
+
+        for dependency in dependencies or []:
+            dependency_key = str(dependency).strip()
+            if not dependency_key:
+                continue
+
+            target = (
+                local_index_to_step_id.get(dependency_key)
+                or operation_to_step_id.get(dependency_key)
+                or operation_to_step_id.get(dependency_key.lower())
+            )
+
+            if target is None and dependency_key.isdigit():
+                target = dependency_key
+
+            if target and target not in resolved:
+                resolved.append(target)
+
+        return resolved
+
+    def _service_display_name(self, service: str) -> str:
+        """Convert canonical service IDs to display names."""
+
+        return self._canonical_service_id(service).replace("_", " ").title()
+
     def _build_flow_visualization(
         self,
         flow_id: str,
@@ -771,16 +969,17 @@ class DefaultFlowOrchestrator:
         for idx, service in enumerate(connectors.required_connectors):
             status_info = connectors.connector_status.get(service, {})
             conn_status = "done" if status_info.get("available") else "failed"
+            display_name = self._service_display_name(service)
             
             step_id = f"{flow_id}-connector-{service}"
             steps.append(AgentFlowStep(
                 id=step_id,
-                label=f"↳ {service.title()}",
+                label=f"↳ {display_name}",
                 description=f"API Key: {'Available' if status_info.get('available') else 'Missing'}",
                 phase="connector-agent",
                 level=3,
                 serviceId=service,
-                serviceName=service.title(),
+                serviceName=display_name,
                 status=conn_status,
             ))
             edges.append(AgentFlowEdge(
@@ -819,6 +1018,7 @@ class DefaultFlowOrchestrator:
         prev_exec_id = exec_node_id
         for exec_step in execution.steps:
             step_id = f"{flow_id}-exec-{exec_step.id}"
+            exec_display_name = self._service_display_name(exec_step.service)
             steps.append(AgentFlowStep(
                 id=step_id,
                 label=f"↳ {exec_step.operation}",
@@ -826,7 +1026,7 @@ class DefaultFlowOrchestrator:
                 phase="execution",
                 level=5,
                 serviceId=exec_step.service,
-                serviceName=exec_step.service.title(),
+                serviceName=exec_display_name,
                 status=exec_step.status,
                 tool=exec_step.tool,
                 arguments=exec_step.arguments,

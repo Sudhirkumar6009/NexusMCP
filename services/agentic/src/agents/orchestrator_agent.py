@@ -34,26 +34,34 @@ class OrchestratorAgent(BaseAgent):
     ) -> AgentFlowResponse:
         start_id = f"start-{plan_id}"
         context_id = f"context-{plan_id}"
-        required_api_id = f"required-api-{plan_id}"
         execution_id = f"execution-{plan_id}"
         end_id = f"end-{plan_id}"
-
-        required_names = [service.service_name for service in required_api.required_services]
-        if required_names:
-            if required_api.all_services_ready:
-                required_api_description = (
-                    f"Required connector APIs available: {', '.join(required_names)}"
-                )
-            else:
-                required_api_description = (
-                    f"Missing connector APIs: {', '.join(required_api.disconnected_services)}"
-                )
-        else:
-            required_api_description = "No connector API key required for this query"
 
         normalized_connector_steps = [
             step.model_copy(update={"level": 3}) for step in connector_steps
         ]
+
+        api_check_steps: List[AgentFlowStep] = []
+        for index, service in enumerate(required_api.required_services):
+            safe_service_id = "".join(
+                ch if ch.isalnum() or ch in "-_" else "-"
+                for ch in service.service_id
+            )
+            api_check_steps.append(
+                AgentFlowStep(
+                    id=f"api-check-{plan_id}-{safe_service_id}-{index}",
+                    label=f"{service.service_name} API KEY CHECK",
+                    description=(
+                        f"{service.reason} "
+                        f"({'connected' if service.is_connected else 'not connected'})"
+                    ),
+                    phase="required-api",
+                    level=2,
+                    serviceId=service.service_id,
+                    serviceName=service.service_name,
+                    status="done" if service.is_connected else "failed",
+                )
+            )
 
         steps: List[AgentFlowStep] = [
             AgentFlowStep(
@@ -70,13 +78,7 @@ class OrchestratorAgent(BaseAgent):
                 phase="context-analysis",
                 level=1,
             ),
-            AgentFlowStep(
-                id=required_api_id,
-                label="CONNECTOR API KEY CHECK",
-                description=required_api_description,
-                phase="required-api",
-                level=2,
-            ),
+            *api_check_steps,
             *normalized_connector_steps,
             AgentFlowStep(
                 id=execution_id,
@@ -99,23 +101,44 @@ class OrchestratorAgent(BaseAgent):
                 id=f"edge-{start_id}-{context_id}",
                 source=start_id,
                 target=context_id,
-            ),
-            AgentFlowEdge(
-                id=f"edge-{context_id}-{required_api_id}",
-                source=context_id,
-                target=required_api_id,
             )
         ]
 
-        if normalized_connector_steps:
-            for step in normalized_connector_steps:
+        api_check_ids = [step.id for step in api_check_steps]
+        api_check_by_service = {
+            step.service_id: step.id
+            for step in api_check_steps
+            if step.service_id
+        }
+
+        if api_check_steps:
+            for api_check_id in api_check_ids:
                 edges.append(
                     AgentFlowEdge(
-                        id=f"edge-{required_api_id}-{step.id}",
-                        source=required_api_id,
-                        target=step.id,
+                        id=f"edge-{context_id}-{api_check_id}",
+                        source=context_id,
+                        target=api_check_id,
                     )
                 )
+
+        if normalized_connector_steps:
+            for step in normalized_connector_steps:
+                source_ids: List[str]
+                if step.service_id and step.service_id in api_check_by_service:
+                    source_ids = [api_check_by_service[step.service_id]]
+                elif api_check_ids:
+                    source_ids = api_check_ids
+                else:
+                    source_ids = [context_id]
+
+                for source_id in source_ids:
+                    edges.append(
+                        AgentFlowEdge(
+                            id=f"edge-{source_id}-{step.id}",
+                            source=source_id,
+                            target=step.id,
+                        )
+                    )
                 edges.append(
                     AgentFlowEdge(
                         id=f"edge-{step.id}-{execution_id}",
@@ -124,13 +147,23 @@ class OrchestratorAgent(BaseAgent):
                     )
                 )
         else:
-            edges.append(
-                AgentFlowEdge(
-                    id=f"edge-{required_api_id}-{execution_id}",
-                    source=required_api_id,
-                    target=execution_id,
+            if api_check_ids:
+                for api_check_id in api_check_ids:
+                    edges.append(
+                        AgentFlowEdge(
+                            id=f"edge-{api_check_id}-{execution_id}",
+                            source=api_check_id,
+                            target=execution_id,
+                        )
+                    )
+            else:
+                edges.append(
+                    AgentFlowEdge(
+                        id=f"edge-{context_id}-{execution_id}",
+                        source=context_id,
+                        target=execution_id,
+                    )
                 )
-            )
 
         edges.append(
             AgentFlowEdge(

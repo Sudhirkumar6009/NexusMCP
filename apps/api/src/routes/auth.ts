@@ -19,6 +19,14 @@ const GOOGLE_GMAIL_SEND_URL =
 
 type AuthenticatedRequest = Request & { userId?: string };
 
+type GoogleTokenExchangeGrant = "authorization_code" | "refresh_token";
+
+interface GoogleTokenExchangeResult {
+  accessToken: string;
+  refreshToken?: string;
+  expiresIn: number;
+}
+
 function hasGoogleStrategy(): boolean {
   const authenticator = passport as passport.Authenticator & {
     _strategy?: (name: string) => unknown;
@@ -122,18 +130,75 @@ function buildTestLoginTokenUser() {
   };
 }
 
-async function refreshGoogleAccessToken(user: IUser): Promise<IUser> {
-  if (!user.googleRefreshToken) {
-    throw new Error(
-      "No Google refresh token available. Please sign in with Google again.",
-    );
+function normalizeOptionalString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
   }
 
-  const clientId = process.env.GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT;
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
 
-  if (!clientId || !clientSecret) {
-    throw new Error("Google OAuth client credentials are not configured");
+function parseExpiresInSeconds(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.floor(value);
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.floor(parsed);
+    }
+  }
+
+  return 3600;
+}
+
+function getGoogleOAuthClientCredentials(overrides?: {
+  clientId?: string;
+  clientSecret?: string;
+}) {
+  return {
+    clientId:
+      normalizeOptionalString(overrides?.clientId) ||
+      process.env.GOOGLE_CLIENT_ID ||
+      process.env.GOOGLE_CLIENT ||
+      "",
+    clientSecret:
+      normalizeOptionalString(overrides?.clientSecret) ||
+      process.env.GOOGLE_CLIENT_SECRET ||
+      "",
+  };
+}
+
+async function exchangeGoogleOAuthToken(args: {
+  grantType: GoogleTokenExchangeGrant;
+  clientId: string;
+  clientSecret: string;
+  authorizationCode?: string;
+  refreshToken?: string;
+  redirectUri?: string;
+}): Promise<GoogleTokenExchangeResult> {
+  const body = new URLSearchParams();
+  body.set("client_id", args.clientId);
+  body.set("client_secret", args.clientSecret);
+  body.set("grant_type", args.grantType);
+
+  if (args.grantType === "authorization_code") {
+    if (!args.authorizationCode || !args.redirectUri) {
+      throw new Error(
+        "authorization_code and redirect_uri are required for code exchange",
+      );
+    }
+
+    body.set("code", args.authorizationCode);
+    body.set("redirect_uri", args.redirectUri);
+  } else {
+    if (!args.refreshToken) {
+      throw new Error("refresh_token is required for token refresh");
+    }
+
+    body.set("refresh_token", args.refreshToken);
   }
 
   const tokenResponse = await fetch(GOOGLE_OAUTH_TOKEN_URL, {
@@ -141,51 +206,85 @@ async function refreshGoogleAccessToken(user: IUser): Promise<IUser> {
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
     },
-    body: new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      refresh_token: user.googleRefreshToken,
-      grant_type: "refresh_token",
-    }).toString(),
+    body: body.toString(),
   });
 
   const tokenText = await tokenResponse.text();
   let tokenPayload: Record<string, unknown> = {};
+
   try {
-    tokenPayload = JSON.parse(tokenText) as Record<string, unknown>;
+    tokenPayload = tokenText
+      ? (JSON.parse(tokenText) as Record<string, unknown>)
+      : {};
   } catch {
     throw new Error(
-      `Google token refresh failed (${tokenResponse.status}): ${tokenText}`,
+      `Google token exchange failed (${tokenResponse.status}): ${tokenText}`,
     );
   }
 
   if (!tokenResponse.ok) {
     throw new Error(
-      `Google token refresh failed (${tokenResponse.status}): ${String(tokenPayload.error_description || tokenPayload.error || tokenResponse.statusText)}`,
+      `Google token exchange failed (${tokenResponse.status}): ${String(tokenPayload.error_description || tokenPayload.error || tokenResponse.statusText)}`,
     );
   }
 
-  const accessToken =
-    typeof tokenPayload.access_token === "string"
-      ? tokenPayload.access_token
-      : undefined;
-
+  const accessToken = normalizeOptionalString(tokenPayload.access_token);
   if (!accessToken) {
-    throw new Error("Google token refresh did not return access_token");
+    throw new Error("Google token exchange did not return access_token");
   }
 
-  const expiresInSeconds =
-    typeof tokenPayload.expires_in === "number"
-      ? tokenPayload.expires_in
-      : 3600;
+  const refreshToken = normalizeOptionalString(tokenPayload.refresh_token);
+  const expiresIn = parseExpiresInSeconds(tokenPayload.expires_in);
 
-  user.googleAccessToken = accessToken;
+  return {
+    accessToken,
+    refreshToken,
+    expiresIn,
+  };
+}
+
+async function persistGoogleTokens(
+  user: IUser,
+  tokenResult: GoogleTokenExchangeResult,
+  fallbackRefreshToken?: string,
+): Promise<IUser> {
+  const resolvedRefreshToken =
+    tokenResult.refreshToken || fallbackRefreshToken || user.googleRefreshToken;
+
+  user.googleAccessToken = tokenResult.accessToken;
   user.googleAccessTokenExpiresAt = new Date(
-    Date.now() + (expiresInSeconds - 60) * 1000,
+    Date.now() + Math.max(tokenResult.expiresIn - 60, 60) * 1000,
   );
-  await user.save();
 
+  if (resolvedRefreshToken) {
+    user.googleRefreshToken = resolvedRefreshToken;
+  }
+
+  await user.save();
   return user;
+}
+
+async function refreshGoogleAccessToken(user: IUser): Promise<IUser> {
+  if (!user.googleRefreshToken) {
+    throw new Error(
+      "No Google refresh token available. Please sign in with Google again.",
+    );
+  }
+
+  const { clientId, clientSecret } = getGoogleOAuthClientCredentials();
+
+  if (!clientId || !clientSecret) {
+    throw new Error("Google OAuth client credentials are not configured");
+  }
+
+  const tokenResult = await exchangeGoogleOAuthToken({
+    grantType: "refresh_token",
+    clientId,
+    clientSecret,
+    refreshToken: user.googleRefreshToken,
+  });
+
+  return persistGoogleTokens(user, tokenResult, user.googleRefreshToken);
 }
 
 // Auth middleware
@@ -501,6 +600,162 @@ router.get(
         },
       ],
     });
+  },
+);
+
+// POST /api/auth/gmail/token - Exchange auth code or refresh Gmail OAuth token
+router.post(
+  "/gmail/token",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const authorizationCode = normalizeOptionalString(body.authorization_code);
+    const redirectUri = normalizeOptionalString(body.redirect_uri);
+    const requestedClientId = normalizeOptionalString(body.client_id);
+    const requestedClientSecret = normalizeOptionalString(body.client_secret);
+
+    try {
+      const userId = (req as AuthenticatedRequest).userId;
+
+      if (userId === TEST_LOGIN_USER_ID) {
+        return res.status(400).json({
+          access_token: "",
+          refresh_token: "",
+          expires_in: 0,
+          error: "Test login cannot persist Gmail OAuth credentials",
+        });
+      }
+
+      const user = (await User.findById(userId).select(
+        "+googleAccessToken +googleRefreshToken +googleAccessTokenExpiresAt",
+      )) as IUser | null;
+
+      if (!user) {
+        return res.status(404).json({
+          access_token: "",
+          refresh_token: "",
+          expires_in: 0,
+          error: "User not found",
+        });
+      }
+
+      const { clientId, clientSecret } = getGoogleOAuthClientCredentials({
+        clientId: requestedClientId,
+        clientSecret: requestedClientSecret,
+      });
+
+      if (!clientId || !clientSecret) {
+        return res.status(400).json({
+          access_token: "",
+          refresh_token: user.googleRefreshToken || "",
+          expires_in: 0,
+          error: "client_id and client_secret are required",
+        });
+      }
+
+      const existingRefreshToken = normalizeOptionalString(
+        user.googleRefreshToken,
+      );
+
+      let tokenResult: GoogleTokenExchangeResult;
+
+      // If we already have a refresh token, refresh silently instead of prompting again.
+      if (existingRefreshToken) {
+        try {
+          tokenResult = await exchangeGoogleOAuthToken({
+            grantType: "refresh_token",
+            clientId,
+            clientSecret,
+            refreshToken: existingRefreshToken,
+          });
+        } catch (refreshError) {
+          if (!authorizationCode || !redirectUri) {
+            const refreshErrorMessage =
+              refreshError instanceof Error
+                ? refreshError.message
+                : "Failed to refresh Gmail access token";
+
+            return res.status(502).json({
+              access_token: "",
+              refresh_token: existingRefreshToken,
+              expires_in: 0,
+              error: refreshErrorMessage,
+            });
+          }
+
+          tokenResult = await exchangeGoogleOAuthToken({
+            grantType: "authorization_code",
+            clientId,
+            clientSecret,
+            authorizationCode,
+            redirectUri,
+          });
+        }
+      } else {
+        if (!authorizationCode) {
+          return res.status(400).json({
+            access_token: "",
+            refresh_token: "",
+            expires_in: 0,
+            error:
+              "authorization_code is required when no refresh_token exists",
+          });
+        }
+
+        if (!redirectUri) {
+          return res.status(400).json({
+            access_token: "",
+            refresh_token: "",
+            expires_in: 0,
+            error: "redirect_uri is required for authorization_code exchange",
+          });
+        }
+
+        tokenResult = await exchangeGoogleOAuthToken({
+          grantType: "authorization_code",
+          clientId,
+          clientSecret,
+          authorizationCode,
+          redirectUri,
+        });
+      }
+
+      const resolvedRefreshToken =
+        tokenResult.refreshToken || existingRefreshToken;
+
+      if (!resolvedRefreshToken) {
+        return res.status(400).json({
+          access_token: tokenResult.accessToken,
+          refresh_token: "",
+          expires_in: tokenResult.expiresIn,
+          error:
+            "Google did not return refresh_token. Re-authorize with access_type=offline and prompt=consent.",
+        });
+      }
+
+      const updatedUser = await persistGoogleTokens(
+        user,
+        tokenResult,
+        resolvedRefreshToken,
+      );
+
+      return res.json({
+        access_token: updatedUser.googleAccessToken || "",
+        refresh_token: updatedUser.googleRefreshToken || resolvedRefreshToken,
+        expires_in: tokenResult.expiresIn,
+      });
+    } catch (error) {
+      console.error("Gmail token handler error:", error);
+      return res.status(500).json({
+        access_token: "",
+        refresh_token: "",
+        expires_in: 0,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to obtain Gmail access token",
+      });
+    }
   },
 );
 

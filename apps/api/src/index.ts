@@ -107,6 +107,8 @@ app.get("/api", (_req, res) => {
         "GET /api/auth/me": "Get current user",
         "PUT /api/auth/me": "Update profile",
         "POST /api/auth/logout": "Logout",
+        "POST /api/auth/gmail/token":
+          "Exchange Gmail OAuth code or refresh access token",
         "POST /api/auth/gmail/send": "Send Gmail using Google OAuth token",
         "GET /auth/google": "Initiate Google OAuth",
         "GET /auth/google/gmail": "Request Gmail send scope and refresh token",

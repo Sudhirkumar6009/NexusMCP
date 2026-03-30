@@ -66,7 +66,13 @@ class JiraAgent(BaseAgent):
     # Tool mappings for Jira operations
     TOOL_MAPPINGS = {
         "get_issue": ["jira.get_issue", "jira_get_issue", "get_issue"],
-        "search_issues": ["jira.search_issues", "jira_search_issues", "search_issues", "jira.jql_search"],
+        "search_issues": [
+            "jira.search_issues",
+            "jira_search_issues",
+            "search_issues",
+            "jira.jql_search",
+            "jira_search",
+        ],
         "create_issue": ["jira.create_issue", "jira_create_issue", "create_issue"],
         "update_issue": ["jira.update_issue", "jira_update_issue", "update_issue", "jira.transition_issue"],
     }
