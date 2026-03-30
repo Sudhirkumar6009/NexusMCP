@@ -7,6 +7,10 @@ import { dataStore } from "../data/store.js";
 const router = Router();
 
 const DEFAULT_CLIENT_URL = "http://localhost:5000";
+const TEST_LOGIN_EMAIL = "test123@gmail.com";
+const TEST_LOGIN_PASSWORD = "Test@123";
+const TEST_LOGIN_USER_ID = "test-login-user";
+const TEST_LOGIN_USER_ROLE: IUser["role"] = "admin";
 const GOOGLE_BASE_AUTH_SCOPES = ["profile", "email"] as const;
 const GOOGLE_GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
 const GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -14,6 +18,34 @@ const GOOGLE_GMAIL_SEND_URL =
   "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
 
 type AuthenticatedRequest = Request & { userId?: string };
+
+function hasGoogleStrategy(): boolean {
+  const authenticator = passport as passport.Authenticator & {
+    _strategy?: (name: string) => unknown;
+  };
+
+  return (
+    typeof authenticator._strategy === "function" &&
+    Boolean(authenticator._strategy("google"))
+  );
+}
+
+function authenticateGoogle(
+  options: passport.AuthenticateOptions & Record<string, unknown>,
+) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!hasGoogleStrategy()) {
+      res.status(503).json({
+        success: false,
+        error:
+          "Google OAuth is not configured on this server. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in apps/api/.env, then restart the API.",
+      });
+      return;
+    }
+
+    passport.authenticate("google", options)(req, res, next);
+  };
+}
 
 function normalizeUrl(url: string): string {
   return url.replace(/\/$/, "");
@@ -62,6 +94,32 @@ function buildGmailRawMessage(args: {
   ].join("\r\n");
 
   return base64UrlEncode(rawMessage);
+}
+
+function buildTestLoginUser() {
+  const adminUser = dataStore.getUser("user-admin");
+  const now = new Date().toISOString();
+
+  return {
+    id: TEST_LOGIN_USER_ID,
+    email: TEST_LOGIN_EMAIL,
+    name: "Test User",
+    avatar: undefined,
+    role: TEST_LOGIN_USER_ROLE,
+    permissions: adminUser?.permissions ?? [],
+    createdAt: now,
+    lastLogin: now,
+  };
+}
+
+function buildTestLoginTokenUser() {
+  return {
+    _id: {
+      toString: () => TEST_LOGIN_USER_ID,
+    },
+    email: TEST_LOGIN_EMAIL,
+    role: TEST_LOGIN_USER_ROLE,
+  };
 }
 
 async function refreshGoogleAccessToken(user: IUser): Promise<IUser> {
@@ -296,10 +354,64 @@ router.post("/login", async (req: Request, res: Response) => {
   }
 });
 
+// POST /api/auth/test-login - Test-only bypass login without DB access
+router.post("/test-login", (req: Request, res: Response) => {
+  try {
+    const { email, password } = req.body ?? {};
+
+    if (
+      typeof email !== "string" ||
+      typeof password !== "string" ||
+      email.toLowerCase() !== TEST_LOGIN_EMAIL ||
+      password !== TEST_LOGIN_PASSWORD
+    ) {
+      res.status(401).json({
+        success: false,
+        error: "Invalid test login credentials",
+      });
+      return;
+    }
+
+    const token = generateToken(buildTestLoginTokenUser());
+
+    dataStore.addLog({
+      level: "info",
+      service: "system",
+      action: "test_login",
+      message: `Test login used: ${TEST_LOGIN_EMAIL}`,
+      userId: TEST_LOGIN_USER_ID,
+    });
+
+    res.json({
+      success: true,
+      data: {
+        user: buildTestLoginUser(),
+        token,
+      },
+      message: "Test login successful",
+    });
+  } catch (error) {
+    console.error("Test login error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to complete test login",
+    });
+  }
+});
+
 // GET /api/auth/me - Get current user
 router.get("/me", authenticateToken, async (req: Request, res: Response) => {
   try {
     const userId = (req as AuthenticatedRequest).userId;
+
+    if (userId === TEST_LOGIN_USER_ID) {
+      res.json({
+        success: true,
+        data: buildTestLoginUser(),
+      });
+      return;
+    }
+
     const user = await User.findById(userId);
 
     if (!user) {
@@ -537,7 +649,7 @@ export const googleAuthRoutes = Router();
 // GET /auth/google - Initiate Google OAuth
 googleAuthRoutes.get(
   "/google",
-  passport.authenticate("google", {
+  authenticateGoogle({
     scope: [...GOOGLE_BASE_AUTH_SCOPES],
     session: false,
   }),
@@ -546,7 +658,7 @@ googleAuthRoutes.get(
 // GET /auth/google/gmail - Re-consent with Gmail send scope
 googleAuthRoutes.get(
   "/google/gmail",
-  passport.authenticate("google", {
+  authenticateGoogle({
     scope: [...GOOGLE_BASE_AUTH_SCOPES, GOOGLE_GMAIL_SEND_SCOPE],
     accessType: "offline",
     prompt: "consent",
@@ -560,7 +672,7 @@ googleAuthRoutes.get(
   "/google/callback",
   (req: Request, res: Response, next: NextFunction) => {
     const failureRedirect = `${getPrimaryClientUrl()}/login?error=Authentication%20failed`;
-    passport.authenticate("google", {
+    authenticateGoogle({
       session: false,
       failureRedirect,
     })(req, res, next);

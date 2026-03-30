@@ -3,19 +3,29 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Zap, ArrowLeft, Mail, Lock, Eye, EyeOff } from "lucide-react";
+import {
+  Zap,
+  ArrowLeft,
+  Mail,
+  Lock,
+  Eye,
+  EyeOff,
+  ShieldCheck,
+} from "lucide-react";
 
 export default function LoginPage() {
   const router = useRouter();
   const [isDark, setIsDark] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isGoogleLoading, setIsGoogleLoading] = useState(false);
+  const [isTestLoginLoading, setIsTestLoginLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [formData, setFormData] = useState({
     email: "",
     password: "",
   });
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000";
 
   useEffect(() => {
     const prefersDark = window.matchMedia(
@@ -31,8 +41,39 @@ export default function LoginPage() {
     setIsGoogleLoading(true);
     setError("");
     // Redirect to backend Google OAuth endpoint
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000";
     window.location.href = `${apiUrl}/auth/google`;
+  };
+
+  const handleTestLogin = async () => {
+    setIsTestLoginLoading(true);
+    setError("");
+
+    try {
+      const response = await fetch(`${apiUrl}/api/auth/test-login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: "test123@gmail.com",
+          password: "Test@123",
+        }),
+        credentials: "include",
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        if (data.data?.token) {
+          localStorage.setItem("auth_token", data.data.token);
+        }
+        router.push("/dashboard");
+      } else {
+        setError(data.error || "Test login failed");
+      }
+    } catch (err) {
+      setError("Network error. Please try again.");
+    } finally {
+      setIsTestLoginLoading(false);
+    }
   };
 
   const handleEmailLogin = async (e: React.FormEvent) => {
@@ -203,6 +244,20 @@ export default function LoginPage() {
               </svg>
             )}
             <span>Continue with Google</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleTestLogin}
+            disabled={isTestLoginLoading}
+            className="mt-3 w-full flex items-center justify-center gap-3 px-4 py-3.5 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-600 hover:bg-amber-500/15 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isTestLoginLoading ? (
+              <div className="w-5 h-5 border-2 border-amber-600 border-t-transparent rounded-full animate-spin" />
+            ) : (
+              <ShieldCheck className="w-5 h-5" />
+            )}
+            <span>Bypass for testing</span>
           </button>
 
           <div className="flex items-center gap-4 my-6">

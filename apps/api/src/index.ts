@@ -1,4 +1,4 @@
-import "dotenv/config";
+import "./config/env.js";
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
@@ -149,8 +149,19 @@ app.use(errorHandler);
 // Start server
 async function startServer() {
   try {
-    // Connect to MongoDB
-    await connectDB();
+    let dbConnected = false;
+
+    try {
+      // Connect to MongoDB
+      await connectDB();
+      dbConnected = true;
+    } catch (error) {
+      if (process.env.NODE_ENV === "production") {
+        throw error;
+      }
+
+      console.warn("MongoDB is unavailable; starting API in no-DB test mode.");
+    }
 
     const server = app.listen(PORT, () => {
       console.log(`
@@ -163,7 +174,7 @@ async function startServer() {
 ║   Health check:      http://localhost:${PORT}/health       ║
 ║                                                           ║
 ║   Environment: ${(process.env.NODE_ENV || "development").padEnd(40)}║
-║   MongoDB: Connected                                      ║
+║   MongoDB: ${(dbConnected ? "Connected" : "Unavailable").padEnd(40)}║
 ║                                                           ║
 ╚═══════════════════════════════════════════════════════════╝
       `);
