@@ -10,6 +10,15 @@ $venvPath = Join-Path $repoRoot ".venv"
 $venvPython = Join-Path $venvPath "Scripts\python.exe"
 $requirementsFile = Join-Path $servicesRoot "requirements-all.txt"
 
+function Invoke-VenvPython {
+  param([string[]]$Arguments)
+
+  & $venvPython @Arguments
+  if ($LASTEXITCODE -ne 0) {
+    throw "Python command failed: $venvPython $($Arguments -join ' ')"
+  }
+}
+
 function Invoke-BasePython {
   param([string[]]$Arguments)
 
@@ -39,11 +48,11 @@ if (-not (Test-Path $requirementsFile)) {
 
 if (-not $SkipDependencyInstall) {
   Write-Host "Installing Python dependencies for all services..."
-  & $venvPython -m pip install --upgrade pip
+  Invoke-VenvPython -Arguments @("-m", "pip", "install", "--upgrade", "pip")
 
   Push-Location $servicesRoot
   try {
-    & $venvPython -m pip install -r $requirementsFile
+    Invoke-VenvPython -Arguments @("-m", "pip", "install", "-r", $requirementsFile)
   }
   finally {
     Pop-Location
