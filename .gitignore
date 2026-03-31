@@ -4,6 +4,8 @@ node_modules/
 # Monorepo cache/build artifacts
 .turbo/
 .next/
+**/.next/
+**/.next/**
 out/
 build/
 dist/
