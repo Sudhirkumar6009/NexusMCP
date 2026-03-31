@@ -3,6 +3,8 @@ node_modules/
 
 # Monorepo cache/build artifacts
 .turbo/
+**/.turbo/
+**/.turbo/**
 .next/
 **/.next/
 **/.next/**
@@ -14,6 +16,8 @@ coverage/
 
 # Python virtual environments and caches
 .venv/
+**/.venv/
+**/.venv/**
 venv/
 env/
 __pycache__/
