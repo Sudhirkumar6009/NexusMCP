@@ -1177,6 +1177,7 @@ export async function executeAgentFlow(args: {
       }
     } else {
       const executionCount = new Map<ServiceId, number>();
+      let executionFailureDetail: string | null = null;
 
       for (const executionStep of executionSteps) {
         if (isAbort(args.signal)) {
@@ -1185,33 +1186,36 @@ export async function executeAgentFlow(args: {
 
         const serviceId = toServiceIdFromTool(executionStep.tool);
         if (!serviceId) {
-          // Log error but continue with other steps if possible
+          executionFailureDetail =
+            executionFailureDetail ||
+            `Unable to resolve connector from tool ${executionStep.tool}`;
+
           emitToolAudit(args.onToolAudit, {
             nodeId: connectorSteps[0]?.id ?? "unknown-node",
             serviceId: "unknown-service",
             tool: executionStep.tool,
             stage: "error",
             request: executionStep.arguments,
-            error: `Unable to resolve connector from tool ${executionStep.tool}`,
+            error: executionFailureDetail,
           });
-
-          // Only mark as failed if this is a critical tool
-          continue;
+          break;
         }
 
         const connectorState = readyConnectorSteps.get(serviceId);
         if (!connectorState) {
-          // Connector not ready - skip this step but continue with others
+          executionFailureDetail =
+            executionFailureDetail ||
+            `Connector ${serviceId} is not connected for tool execution`;
+
           emitToolAudit(args.onToolAudit, {
             nodeId: connectorSteps[0]?.id ?? "unknown-node",
             serviceId,
             tool: executionStep.tool,
             stage: "error",
             request: executionStep.arguments,
-            error: `Connector ${serviceId} is not connected for tool execution`,
+            error: executionFailureDetail,
           });
-
-          continue;
+          break;
         }
 
         args.onStatusUpdate({
@@ -1243,13 +1247,14 @@ export async function executeAgentFlow(args: {
           !executionResponse.data ||
           executionResponse.data.error
         ) {
-          // Track execution failure but continue with other tools if possible
+          // Fail-fast: stop at first tool error to keep workflow deterministic.
           failedConnectorNodeIds.add(connectorState.nodeId);
 
           const failureDetail =
             executionResponse.error ||
             executionResponse.data?.error?.message ||
             `Execution failed for ${executionStep.tool}`;
+          executionFailureDetail = executionFailureDetail || failureDetail;
 
           emitToolAudit(args.onToolAudit, {
             nodeId: connectorState.nodeId,
@@ -1267,8 +1272,7 @@ export async function executeAgentFlow(args: {
             detail: failureDetail,
           });
 
-          // Continue with other execution steps instead of breaking
-          continue;
+          break;
         }
 
         executionCount.set(serviceId, (executionCount.get(serviceId) ?? 0) + 1);
@@ -1287,6 +1291,20 @@ export async function executeAgentFlow(args: {
           status: "working",
           detail: `Executed ${executionStep.tool}`,
         });
+      }
+
+      if (executionFailureDetail) {
+        args.onStatusUpdate({
+          nodeId: orchestratorStep.id,
+          status: "failed",
+          detail: executionFailureDetail,
+        });
+        args.onStatusUpdate({
+          nodeId: endStep.id,
+          status: "failed",
+          detail: "Flow terminated after connector/tool execution error",
+        });
+        return "failed";
       }
 
       for (const [serviceId, connectorState] of Array.from(

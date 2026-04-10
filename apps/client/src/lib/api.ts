@@ -145,6 +145,11 @@ export const integrationsApi = {
 
   get: (id: string) => fetchApi<Integration>(`/integrations/${id}`),
 
+  getEnvCredentials: () =>
+    fetchApi<Record<string, Record<string, unknown>>>(
+      "/integrations/env-credentials",
+    ),
+
   connect: (id: string, credentials: Record<string, unknown>) =>
     fetchApi<Integration>(`/integrations/${id}/connect`, {
       method: "POST",

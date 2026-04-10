@@ -447,23 +447,14 @@ class DefaultFlowOrchestrator:
             extracted_params["issue_key"] = issue_match.group(1)
         
         # Repository name
-        repo_patterns = [
-            r"\brepo(?:sitory)?(?:\s+(?:is|as|named|name))?\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\b",
-            r"\bin\s+repo(?:sitory)?(?:\s+(?:is|as|named|name))?\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\b",
-            r"\bin\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\s+repo(?:sitory)?\b",
-        ]
-        invalid_repo_tokens = {"as", "is", "name", "named", "repo", "repository"}
-        for pattern in repo_patterns:
-            repo_match = re.search(pattern, prompt, re.IGNORECASE)
-            if not repo_match:
-                continue
-
-            repo_candidate = repo_match.group(1).strip()
-            if repo_candidate.lower() in invalid_repo_tokens:
-                continue
-
-            extracted_params["repo"] = repo_candidate
-            break
+        repo_match = re.search(r"\brepo(?:sitory)?\s+([a-zA-Z0-9._/-]+)", prompt, re.IGNORECASE)
+        if repo_match:
+            extracted_params["repo"] = repo_match.group(1)
+        else:
+            # "in <repo>" pattern
+            in_repo = re.search(r"\bin\s+([a-zA-Z0-9._-]+)(?:\s+repo)?", prompt, re.IGNORECASE)
+            if in_repo:
+                extracted_params["repo"] = in_repo.group(1)
         
         # Branch name
         branch_match = re.search(r"\bbranch\s+([a-zA-Z0-9._/-]+)", prompt, re.IGNORECASE)

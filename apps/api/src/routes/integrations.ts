@@ -1,5 +1,8 @@
 import { Router } from "express";
 import { createHmac, createHash, createSign } from "crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { parse as parseDotEnv } from "dotenv";
 import { dataStore } from "../data/store.js";
 import { User, IUser } from "../models/User.js";
 
@@ -34,6 +37,63 @@ function normalizeOptionalString(value: unknown): string | undefined {
 
   const trimmed = value.trim();
   return trimmed ? trimmed : undefined;
+}
+
+const envFileCandidates = [
+  resolve(process.cwd(), "services", ".env"),
+  resolve(process.cwd(), "services/.env"),
+  resolve(process.cwd(), "..", "services", ".env"),
+  resolve(__dirname, "../../../../services/.env"),
+];
+
+function loadServicesEnvFile(): Record<string, string> {
+  for (const envPath of envFileCandidates) {
+    if (!existsSync(envPath)) {
+      continue;
+    }
+
+    try {
+      const raw = readFileSync(envPath, "utf8");
+      return parseDotEnv(raw);
+    } catch {
+      return {};
+    }
+  }
+
+  return {};
+}
+
+function pickEnvValue(
+  envFile: Record<string, string>,
+  keys: string[],
+): string | undefined {
+  for (const key of keys) {
+    const envValue = normalizeOptionalString(process.env[key]);
+    if (envValue) {
+      return envValue;
+    }
+
+    const fileValue = normalizeOptionalString(envFile[key]);
+    if (fileValue) {
+      return fileValue;
+    }
+  }
+
+  return undefined;
+}
+
+function compactCredentials<T extends Record<string, unknown>>(
+  values: T,
+): Partial<T> {
+  const cleaned: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(values)) {
+    if (typeof value === "string" && value.trim()) {
+      cleaned[key] = value;
+    }
+  }
+
+  return cleaned as Partial<T>;
 }
 
 function parseExpiresInSeconds(value: unknown): number {
@@ -822,6 +882,72 @@ async function validateProvider(
 
   throw new Error(`No validator configured for provider: ${service}`);
 }
+
+// GET /api/integrations/env-credentials - Read connector credentials from env
+router.get("/env-credentials", (_req, res) => {
+  const envFile = loadServicesEnvFile();
+
+  const jiraCredentials = compactCredentials({
+    apiKey: pickEnvValue(envFile, ["JIRA_API_TOKEN", "JIRA_TOKEN"]),
+    username: pickEnvValue(envFile, ["JIRA_EMAIL"]),
+    baseUrl: pickEnvValue(envFile, ["JIRA_BASE_URL", "JIRA_URL"]),
+  });
+
+  const slackCredentials = compactCredentials({
+    accessToken: pickEnvValue(envFile, [
+      "SLACK_BOT_TOKEN",
+      "SLACK_TOKEN",
+      "SLACK_ACCESS_TOKEN",
+      "SLACK_REFRESH_TOKEN",
+    ]),
+  });
+
+  const githubCredentials = compactCredentials({
+    accessToken: pickEnvValue(envFile, ["GITHUB_TOKEN"]),
+    baseUrl: pickEnvValue(envFile, ["GITHUB_API_URL"]),
+  });
+
+  const sheetsCredentials = compactCredentials({
+    googleServiceAccountJson: pickEnvValue(envFile, [
+      "GOOGLE_SERVICE_ACCOUNT_JSON",
+    ]),
+    spreadsheetId: pickEnvValue(envFile, [
+      "GOOGLE_SHEETS_SPREADSHEET_ID",
+      "SPREADSHEET_ID",
+    ]),
+    accessToken: pickEnvValue(envFile, ["GOOGLE_ACCESS_TOKEN"]),
+    apiKey: pickEnvValue(envFile, ["GOOGLE_SHEETS_API_KEY"]),
+  });
+
+  const gmailCredentials = compactCredentials({
+    accessToken: pickEnvValue(envFile, ["GMAIL_ACCESS_TOKEN"]),
+    refreshToken: pickEnvValue(envFile, ["GMAIL_REFRESH_TOKEN"]),
+  });
+
+  const awsCredentials = compactCredentials({
+    accessKeyId: pickEnvValue(envFile, ["AWS_ACCESS_KEY_ID", "AWS_ACCESS_KEY"]),
+    secretAccessKey: pickEnvValue(envFile, [
+      "AWS_SECRET_ACCESS_KEY",
+      "AWS_SECRET_KEY",
+    ]),
+    sessionToken: pickEnvValue(envFile, ["AWS_SESSION_TOKEN"]),
+    region: pickEnvValue(envFile, ["AWS_REGION"]),
+  });
+
+  const envCredentials = {
+    jira: jiraCredentials,
+    slack: slackCredentials,
+    github: githubCredentials,
+    google_sheets: sheetsCredentials,
+    gmail: gmailCredentials,
+    aws: awsCredentials,
+  };
+
+  res.json({
+    success: true,
+    data: envCredentials,
+  });
+});
 
 // GET /api/integrations - List all integrations
 router.get("/", (_req, res) => {
