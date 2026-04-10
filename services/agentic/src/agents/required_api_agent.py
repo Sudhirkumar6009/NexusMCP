@@ -369,9 +369,23 @@ class RequiredAPIAgent(BaseAgent):
             params["issue_key"] = issue_match.group(1)
         
         # Extract repository name
-        repo_match = re.search(r"\brepo(?:sitory)?\s+([a-zA-Z0-9._/-]+)\b", prompt, re.IGNORECASE)
-        if repo_match:
-            params["repo"] = repo_match.group(1)
+        repo_patterns = [
+            r"\brepo(?:sitory)?(?:\s+(?:is|as|named|name))?\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\b",
+            r"\bin\s+repo(?:sitory)?(?:\s+(?:is|as|named|name))?\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\b",
+            r"\bin\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\s+repo(?:sitory)?\b",
+        ]
+        invalid_repo_tokens = {"as", "is", "name", "named", "repo", "repository"}
+        for pattern in repo_patterns:
+            repo_match = re.search(pattern, prompt, re.IGNORECASE)
+            if not repo_match:
+                continue
+
+            repo_candidate = repo_match.group(1).strip()
+            if repo_candidate.lower() in invalid_repo_tokens:
+                continue
+
+            params["repo"] = repo_candidate
+            break
         
         # Extract branch name
         branch_match = re.search(r"\bbranch\s+([a-zA-Z0-9._/-]+)\b", prompt, re.IGNORECASE)
