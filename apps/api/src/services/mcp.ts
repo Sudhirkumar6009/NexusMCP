@@ -127,6 +127,18 @@ const METHOD_ALIASES: Record<string, string> = {
   slack_create_channel: "slack.createChannel",
   "slack.update_message": "slack.updateMessage",
   slack_update_message: "slack.updateMessage",
+  "slack.get_channel": "slack.getChannel",
+  slack_get_channel: "slack.getChannel",
+  "slack.get_user": "slack.getUser",
+  slack_get_user: "slack.getUser",
+  "slack.reply_in_thread": "slack.replyInThread",
+  slack_reply_in_thread: "slack.replyInThread",
+  "slack.get_thread_messages": "slack.getThreadMessages",
+  slack_get_thread_messages: "slack.getThreadMessages",
+  "slack.listen_slack_events": "slack.listenSlackEvents",
+  slack_listen_slack_events: "slack.listenSlackEvents",
+  "slack.handle_interactions": "slack.handleInteractions",
+  slack_handle_interactions: "slack.handleInteractions",
   "slack.post_thread_reply": "slack.postThreadReply",
   slack_post_thread_reply: "slack.postThreadReply",
   "slack.delete_message": "slack.deleteMessage",
@@ -227,6 +239,32 @@ function parseBodyAsList(value: unknown): unknown[] {
 
 function parseBodyAsRecord(value: unknown): JsonRecord {
   return asRecord(value);
+}
+
+function parseJsonLikePayload(value: unknown): JsonRecord {
+  if (typeof value !== "string") {
+    return asRecord(value);
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return {};
+  }
+
+  if (trimmed.startsWith("payload=")) {
+    const encoded = trimmed.slice("payload=".length);
+    try {
+      return asRecord(JSON.parse(decodeURIComponent(encoded)));
+    } catch {
+      return {};
+    }
+  }
+
+  try {
+    return asRecord(JSON.parse(trimmed));
+  } catch {
+    return {};
+  }
 }
 
 function parseIssueKeyFromPrompt(prompt: string): string | undefined {
@@ -871,6 +909,65 @@ async function resolveSlackChannelId(
 
   const matchedChannel = parseBodyAsRecord(matched);
   return pickString(matchedChannel, ["id"]) || trimmed.replace(/^#/, "");
+}
+
+async function resolveSlackUserId(
+  config: SlackConfig,
+  userOrEmailOrName: string,
+): Promise<string> {
+  const trimmed = userOrEmailOrName.trim();
+  if (!trimmed) {
+    throw new Error("Slack user identifier is required.");
+  }
+
+  if (/^[UW][A-Z0-9]+$/i.test(trimmed)) {
+    return trimmed;
+  }
+
+  if (trimmed.includes("@")) {
+    const lookup = await slackApiRequest(config, "users.lookupByEmail", {
+      email: trimmed,
+    });
+    const user = parseBodyAsRecord(lookup.user);
+    const userId = pickString(user, ["id"]);
+    if (userId) {
+      return userId;
+    }
+  }
+
+  const membersPayload = await slackApiRequest(
+    config,
+    "users.list",
+    { limit: 1000 },
+    { httpMethod: "GET" },
+  );
+  const normalized = trimmed.replace(/^@/, "").toLowerCase();
+
+  const members = parseBodyAsList(membersPayload.members);
+  const matched = members.find((entry) => {
+    const user = parseBodyAsRecord(entry);
+    const profile = parseBodyAsRecord(user.profile);
+    const name = pickString(user, ["name"]);
+    const realName = pickString(user, ["real_name"]);
+    const displayName = pickString(profile, ["display_name"]);
+
+    return [name, realName, displayName]
+      .filter((value): value is string => Boolean(value))
+      .some((value) => value.toLowerCase() === normalized);
+  });
+
+  if (!matched) {
+    throw new Error(`Slack user not found for '${userOrEmailOrName}'.`);
+  }
+
+  const matchedUser = parseBodyAsRecord(matched);
+  const matchedId = pickString(matchedUser, ["id"]);
+
+  if (!matchedId) {
+    throw new Error(`Slack user ID missing for '${userOrEmailOrName}'.`);
+  }
+
+  return matchedId;
 }
 
 async function getSheetsConfig(params: JsonRecord): Promise<SheetsConfig> {
@@ -2037,12 +2134,16 @@ const handlers: Record<string, MCPHandler> = {
 
     const channel = await resolveSlackChannelId(config, channelInput);
     const blocks = Array.isArray(payload.blocks) ? payload.blocks : undefined;
+    const attachments = Array.isArray(payload.attachments)
+      ? payload.attachments
+      : undefined;
     const threadTs = pickString(payload, ["thread_ts", "threadTs"]);
 
     const result = await slackApiRequest(config, "chat.postMessage", {
       channel,
       text,
       ...(blocks ? { blocks } : {}),
+      ...(attachments ? { attachments } : {}),
       ...(threadTs ? { thread_ts: threadTs } : {}),
     });
 
@@ -2095,6 +2196,98 @@ const handlers: Record<string, MCPHandler> = {
     return {
       channels,
       count: channels.length,
+    };
+  },
+
+  "slack.getChannel": async (params) => {
+    const payload = params as JsonRecord;
+    const config = getSlackConfig(payload);
+    const channelInput = pickString(payload, [
+      "channel",
+      "channel_id",
+      "name",
+      "id",
+    ]);
+
+    if (!channelInput) {
+      throw new Error("slack.get_channel requires channel or channel_id.");
+    }
+
+    const channel = await resolveSlackChannelId(config, channelInput);
+    const result = await slackApiRequest(
+      config,
+      "conversations.info",
+      {
+        channel,
+        include_locale: true,
+        include_num_members: true,
+      },
+      { httpMethod: "GET" },
+    );
+
+    const details = parseBodyAsRecord(result.channel);
+    return {
+      id: pickString(details, ["id"]),
+      name: pickString(details, ["name"]),
+      is_private: Boolean(details.is_private),
+      is_archived: Boolean(details.is_archived),
+      is_member: Boolean(details.is_member),
+      topic: pickString(parseBodyAsRecord(details.topic), ["value"]),
+      purpose: pickString(parseBodyAsRecord(details.purpose), ["value"]),
+      num_members:
+        typeof details.num_members === "number" ? details.num_members : undefined,
+    };
+  },
+
+  "slack.getUser": async (params) => {
+    const payload = params as JsonRecord;
+    const config = getSlackConfig(payload);
+    const identifier =
+      pickString(payload, ["user", "user_id", "email", "name", "username"]) ||
+      "";
+
+    if (!identifier) {
+      throw new Error(
+        "slack.get_user requires user identifier (user_id, email, or name).",
+      );
+    }
+
+    const userId = await resolveSlackUserId(config, identifier);
+    const userPayload = await slackApiRequest(
+      config,
+      "users.info",
+      { user: userId, include_locale: true },
+      { httpMethod: "GET" },
+    );
+
+    const user = parseBodyAsRecord(userPayload.user);
+    const profile = parseBodyAsRecord(user.profile);
+
+    let presence = "unknown";
+    try {
+      const presencePayload = await slackApiRequest(
+        config,
+        "users.getPresence",
+        { user: userId },
+        { httpMethod: "GET" },
+      );
+      presence = pickString(presencePayload, ["presence"]) || "unknown";
+    } catch {
+      presence = "unknown";
+    }
+
+    return {
+      id: pickString(user, ["id"]),
+      name: pickString(user, ["name"]),
+      real_name: pickString(user, ["real_name"]),
+      display_name: pickString(profile, ["display_name"]),
+      email: pickString(profile, ["email"]),
+      title: pickString(profile, ["title"]),
+      tz: pickString(user, ["tz"]),
+      is_bot: Boolean(user.is_bot),
+      is_admin: Boolean(user.is_admin),
+      is_owner: Boolean(user.is_owner),
+      presence,
     };
   },
 
@@ -2153,39 +2346,76 @@ const handlers: Record<string, MCPHandler> = {
       pickString(payload, ["user", "user_id", "recipient", "email"]) || "";
     const text =
       pickString(payload, ["text", "message", "body"]) || "NexusMCP update";
+    const blocks = Array.isArray(payload.blocks) ? payload.blocks : undefined;
+    const attachments = Array.isArray(payload.attachments)
+      ? payload.attachments
+      : undefined;
 
-    if (!recipient) {
-      throw new Error("Slack recipient is required for direct messages.");
+    const explicitChannel = pickString(payload, ["channel", "channel_id", "group"]);
+    const recipients = parseBodyAsList(payload.users ?? payload.recipients)
+      .map((entry) => String(entry).trim())
+      .filter(Boolean);
+
+    if (recipient) {
+      recipients.push(
+        ...recipient
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter(Boolean),
+      );
     }
 
-    let userId = recipient;
-    if (recipient.includes("@")) {
-      const lookup = await slackApiRequest(config, "users.lookupByEmail", {
-        email: recipient,
+    const uniqueRecipients = Array.from(new Set(recipients));
+
+    if (!explicitChannel && uniqueRecipients.length === 0) {
+      throw new Error(
+        "Slack recipient is required for direct messages (user/user_id/email or users array).",
+      );
+    }
+
+    let channelId: string | undefined;
+    let userIds: string[] = [];
+
+    if (explicitChannel) {
+      channelId = await resolveSlackChannelId(config, explicitChannel);
+    } else {
+      userIds = await Promise.all(
+        uniqueRecipients.map((entry) => resolveSlackUserId(config, entry)),
+      );
+
+      const opened = await slackApiRequest(config, "conversations.open", {
+        users: userIds.join(","),
       });
-      const user = parseBodyAsRecord(lookup.user);
-      userId = pickString(user, ["id"]) || recipient;
+      const channel = parseBodyAsRecord(opened.channel);
+      channelId = pickString(channel, ["id"]);
     }
-
-    const opened = await slackApiRequest(config, "conversations.open", {
-      users: userId,
-    });
-    const channel = parseBodyAsRecord(opened.channel);
-    const channelId = pickString(channel, ["id"]);
 
     if (!channelId) {
-      throw new Error("Could not resolve Slack DM channel.");
+      throw new Error("Could not resolve Slack DM/group channel.");
     }
 
     const sent = await slackApiRequest(config, "chat.postMessage", {
       channel: channelId,
       text,
+      ...(blocks ? { blocks } : {}),
+      ...(attachments ? { attachments } : {}),
+    });
+
+    dataStore.addLog({
+      level: "info",
+      service: "slack",
+      action: "send_dm",
+      message: `Sent Slack DM/group message to ${channelId}`,
+      details: {
+        channel: channelId,
+        recipientCount: userIds.length || uniqueRecipients.length,
+      },
     });
 
     return {
       ok: true,
       ts: sent.ts,
-      user: userId,
+      recipients: uniqueRecipients,
       channel: channelId,
     };
   },
