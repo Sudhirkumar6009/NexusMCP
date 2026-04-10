@@ -35,6 +35,7 @@ const availableScopes: Record<ServiceId, string[]> = {
   gmail: [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.compose",
   ],
   aws: ["sts:GetCallerIdentity", "lambda:InvokeFunction", "s3:ListBucket"],
 };

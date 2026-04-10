@@ -419,6 +419,7 @@ interface AuditLog {
   service: ServiceType | "system";
   action: string;
   message: string;
+  executionId?: string;
   details?: Record<string, unknown>;
   workflowId?: string;
   nodeId?: string;

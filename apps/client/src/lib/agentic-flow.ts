@@ -28,6 +28,10 @@ const CONNECTOR_KEYWORDS: Record<ServiceId, string[]> = {
 
 const ALL_CONNECTORS_REGEX =
   /all\s+(the\s+)?(connectors|integrations|services)|every\s+connector/i;
+const READINESS_INTENT_REGEX =
+  /\b(report|check|show|verify|confirm)\s+(the\s+)?(connection\s+)?(readiness|status)\b|\breadiness\b|\bconnection\s+status\b/i;
+const ACTION_INTENT_REGEX =
+  /\b(create|update|delete|send|post|comment|append|write|search|query|transition|merge|run|execute)\b/i;
 // Removed CONTEXT_FAILURE_REGEX - was causing false failures in production
 const EXCLUSION_HINT_REGEX = /(skip|exclude|except|without|omit|ignore)/i;
 
@@ -331,18 +335,30 @@ function chooseTargetServices(
     return targeted;
   }
 
-  const connected = withoutExcluded(
-    integrations
-      .filter((integration) => integration.status === "connected")
-      .map((integration) => integration.id),
-  );
-
-  if (connected.length > 0) {
-    return connected;
-  }
-
   // Do not add arbitrary connectors when prompt does not imply any.
   return [];
+}
+
+function isReadinessOnlyPrompt(prompt: string): boolean {
+  const normalized = normalizedPrompt(prompt);
+  const mentionsAllConnectors = ALL_CONNECTORS_REGEX.test(normalized);
+
+  if (!mentionsAllConnectors) {
+    return false;
+  }
+
+  if (!READINESS_INTENT_REGEX.test(normalized)) {
+    return false;
+  }
+
+  return !ACTION_INTENT_REGEX.test(normalized);
+}
+
+export function getTargetServiceIds(
+  prompt: string,
+  integrations: Integration[],
+): ServiceId[] {
+  return chooseTargetServices(prompt, integrations);
 }
 
 function connectorUnavailableReason(integration?: Integration): string | null {
@@ -986,6 +1002,9 @@ export async function executeAgentFlow(args: {
   }
 
   const executionSteps = toExecutionSteps(args.plan);
+  const readinessOnlyPrompt = isReadinessOnlyPrompt(args.prompt);
+  const flowExecutionId = `exec-${args.plan.id}`;
+  const workflowId = args.plan.id;
   const readyConnectorSteps = new Map<
     ServiceId,
     { integration: Integration; nodeId: string }
@@ -1163,7 +1182,7 @@ export async function executeAgentFlow(args: {
     connectorSteps.every((step) => failedConnectorNodeIds.has(step.id));
 
   if (hasReadyConnectors) {
-    if (executionSteps.length === 0) {
+    if (executionSteps.length === 0 || readinessOnlyPrompt) {
       for (const connectorState of Array.from(readyConnectorSteps.values())) {
         if (failedConnectorNodeIds.has(connectorState.nodeId)) {
           continue;
@@ -1172,7 +1191,9 @@ export async function executeAgentFlow(args: {
         args.onStatusUpdate({
           nodeId: connectorState.nodeId,
           status: "done",
-          detail: `${connectorState.integration.name} is connected and ready`,
+          detail: readinessOnlyPrompt
+            ? `${connectorState.integration.name} readiness confirmed`
+            : `${connectorState.integration.name} is connected and ready`,
         });
       }
     } else {
@@ -1227,6 +1248,11 @@ export async function executeAgentFlow(args: {
         const toolRequest = {
           ...executionStep.arguments,
           prompt: args.prompt,
+          executionId: flowExecutionId,
+          execution_id: flowExecutionId,
+          workflowId,
+          workflow_id: workflowId,
+          workflowName: "Agentic Flow Runtime",
         };
 
         emitToolAudit(args.onToolAudit, {

@@ -39,6 +39,10 @@ type GmailConfig = {
   refreshToken?: string;
 };
 
+const GMAIL_READ_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
+const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
+const GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose";
+
 type GoogleServiceAccountCredentials = {
   client_email: string;
   private_key: string;
@@ -80,8 +84,16 @@ const METHOD_ALIASES: Record<string, string> = {
   github_create_pr: "github.createPullRequest",
   "github.create_pull_request": "github.createPullRequest",
   github_create_pull_request: "github.createPullRequest",
+  "github.merge_pull_request": "github.mergePullRequest",
+  github_merge_pull_request: "github.mergePullRequest",
+  "github.merge_pr": "github.mergePullRequest",
+  github_merge_pr: "github.mergePullRequest",
   "github.create_branch": "github.createBranch",
   github_create_branch: "github.createBranch",
+  "github.get_branch": "github.getBranch",
+  github_get_branch: "github.getBranch",
+  "github.delete_branch": "github.deleteBranch",
+  github_delete_branch: "github.deleteBranch",
   "github.create_file": "github.createOrUpdateFile",
   github_create_file: "github.createOrUpdateFile",
   "github.update_file": "github.createOrUpdateFile",
@@ -90,6 +102,16 @@ const METHOD_ALIASES: Record<string, string> = {
   github_create_or_update_file: "github.createOrUpdateFile",
   "github.commit_file": "github.createOrUpdateFile",
   github_commit_file: "github.createOrUpdateFile",
+  "github.trigger_workflow": "github.triggerWorkflow",
+  github_trigger_workflow: "github.triggerWorkflow",
+  "github.get_workflow_status": "github.getWorkflowStatus",
+  github_get_workflow_status: "github.getWorkflowStatus",
+  "github.listen_repo_events": "github.listenRepoEvents",
+  github_listen_repo_events: "github.listenRepoEvents",
+  "github.list_repositories": "github.listRepositories",
+  github_list_repositories: "github.listRepositories",
+  "github.check_connection": "github.checkConnection",
+  github_check_connection: "github.checkConnection",
   "slack.send_message": "slack.sendMessage",
   slack_send_message: "slack.sendMessage",
   "slack.post_message": "slack.sendMessage",
@@ -319,6 +341,35 @@ function normalizeErrorDetail(payload: unknown, fallback: string): string {
 
   if (typeof record.detail === "string" && record.detail.trim().length > 0) {
     return record.detail.trim();
+  }
+
+  const nestedError = asRecord(record.error);
+  if (
+    typeof nestedError.message === "string" &&
+    nestedError.message.trim().length > 0
+  ) {
+    return nestedError.message.trim();
+  }
+
+  if (
+    typeof nestedError.detail === "string" &&
+    nestedError.detail.trim().length > 0
+  ) {
+    return nestedError.detail.trim();
+  }
+
+  const nestedErrors = parseBodyAsList(nestedError.errors)
+    .map((entry) => {
+      const item = asRecord(entry);
+      return (
+        pickString(item, ["message", "reason", "domain"]) ||
+        (typeof item === "string" ? item : "")
+      );
+    })
+    .filter((value): value is string => value.trim().length > 0);
+
+  if (nestedErrors.length > 0) {
+    return nestedErrors.join("; ");
   }
 
   return fallback;
@@ -1005,25 +1056,69 @@ async function getGmailConfig(params: JsonRecord): Promise<GmailConfig> {
   };
 }
 
+function getGmailRequiredScopes(
+  operation: "list_messages" | "send_message" | "create_draft",
+): string[] {
+  if (operation === "list_messages") {
+    return [GMAIL_READ_SCOPE];
+  }
+
+  if (operation === "send_message") {
+    return [GMAIL_SEND_SCOPE];
+  }
+
+  return [GMAIL_COMPOSE_SCOPE];
+}
+
+function withGmailPermissionGuidance(
+  error: unknown,
+  operation: "list_messages" | "send_message" | "create_draft",
+): Error {
+  const message =
+    error instanceof Error ? error.message : "Unknown Gmail request error";
+
+  if (!/gmail request failed \(403\)/i.test(message)) {
+    return error instanceof Error ? error : new Error(message);
+  }
+
+  const requiredScopes = getGmailRequiredScopes(operation).join(", ");
+  return new Error(
+    `${message}. Reconnect Gmail with required scopes: ${requiredScopes}. If using OAuth route, re-authorize via /auth/google/gmail.`,
+  );
+}
+
 async function gmailApiRequest(
   config: GmailConfig,
   method: "GET" | "POST",
   path: string,
   body?: unknown,
 ): Promise<JsonRecord> {
-  const response = await fetch(
-    `https://gmail.googleapis.com/gmail/v1/users/me${path}`,
-    {
-      method,
-      headers: {
-        Authorization: `Bearer ${config.accessToken}`,
-        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+  const executeRequest = async (accessToken: string) => {
+    const response = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me${path}`,
+      {
+        method,
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    },
-  );
+    );
 
-  const payload = await parseResponseBody(response);
+    const payload = await parseResponseBody(response);
+    return { response, payload };
+  };
+
+  let { response, payload } = await executeRequest(config.accessToken);
+
+  // Retry once with refresh token if current access token is expired/invalid.
+  if (response.status === 401 && config.refreshToken) {
+    const refreshed = await exchangeGoogleRefreshToken(config.refreshToken);
+    config.accessToken = refreshed.accessToken;
+    ({ response, payload } = await executeRequest(config.accessToken));
+  }
+
   if (!response.ok) {
     throw new Error(
       `Gmail request failed (${response.status}): ${normalizeErrorDetail(
@@ -1168,6 +1263,91 @@ function resolveOptionalIssueKey(params: JsonRecord): string | undefined {
 
 function resolveBaseBranch(params: JsonRecord): string {
   return pickString(params, ["base", "base_branch", "target_branch"]) || "main";
+}
+
+function resolveNumericParam(
+  params: JsonRecord,
+  keys: string[],
+): number | undefined {
+  for (const key of keys) {
+    const value = params[key];
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return Math.floor(value);
+    }
+
+    if (typeof value === "string" && value.trim()) {
+      const parsed = Number(value.trim());
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return Math.floor(parsed);
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function resolvePullRequestNumber(params: JsonRecord): number {
+  const direct = resolveNumericParam(params, [
+    "pull_number",
+    "pullNumber",
+    "pr_number",
+    "prNumber",
+    "number",
+  ]);
+
+  if (direct) {
+    return direct;
+  }
+
+  const url = pickString(params, [
+    "pull_url",
+    "pullRequestUrl",
+    "url",
+    "html_url",
+  ]);
+  const fromUrl = url?.match(/\/pull\/(\d+)/i)?.[1];
+  if (fromUrl) {
+    const parsed = Number(fromUrl);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.floor(parsed);
+    }
+  }
+
+  throw new Error("Pull request number is required (for example 42).");
+}
+
+function resolveRequiredBranchName(params: JsonRecord): string {
+  const branch = pickString(params, [
+    "branch",
+    "branch_name",
+    "name",
+    "head",
+    "ref",
+  ]);
+
+  if (!branch) {
+    throw new Error("Branch name is required.");
+  }
+
+  return branch;
+}
+
+function resolveWorkflowIdentifier(params: JsonRecord): string {
+  const workflowId = pickString(params, [
+    "workflow_id",
+    "workflowId",
+    "workflow",
+    "workflow_name",
+    "workflowName",
+  ]);
+
+  if (!workflowId) {
+    throw new Error(
+      "Workflow identifier is required (workflow_id, workflow name, or workflow file name).",
+    );
+  }
+
+  return workflowId;
 }
 
 function resolveFilePath(params: JsonRecord): string {
@@ -1615,17 +1795,74 @@ const handlers: Record<string, MCPHandler> = {
     const config = getJiraConfig(payload);
     const jql = pickString(payload, ["jql"]) || "order by created DESC";
     const maxResults = Number(payload.maxResults ?? payload.max_results ?? 10);
+    const safeMaxResults = Number.isFinite(maxResults)
+      ? Math.max(1, Math.min(100, Math.floor(maxResults)))
+      : 10;
 
     const query = new URLSearchParams({
       jql,
-      maxResults: String(Number.isFinite(maxResults) ? maxResults : 10),
+      maxResults: String(safeMaxResults),
     }).toString();
 
-    const searchResult = await jiraRequest(
-      config,
-      "GET",
-      `/rest/api/3/search?${query}`,
-    );
+    const searchAttempts: Array<() => Promise<JsonRecord>> = [
+      () =>
+        jiraRequest(config, "POST", "/rest/api/3/search/jql", {
+          jql,
+          maxResults: safeMaxResults,
+        }),
+      () =>
+        jiraRequest(config, "POST", "/rest/api/3/search", {
+          jql,
+          maxResults: safeMaxResults,
+        }),
+      () => jiraRequest(config, "GET", `/rest/api/3/search/jql?${query}`),
+      () => jiraRequest(config, "GET", `/rest/api/3/search?${query}`),
+    ];
+
+    let searchResult: JsonRecord | null = null;
+    const attemptErrors: string[] = [];
+
+    for (const attempt of searchAttempts) {
+      try {
+        searchResult = await attempt();
+        break;
+      } catch (error) {
+        const detail =
+          error instanceof Error ? error.message : "Unknown Jira error";
+        attemptErrors.push(detail);
+      }
+    }
+
+    if (!searchResult) {
+      const retryableEndpointFailure = attemptErrors.every((message) =>
+        /jira request failed \((404|410|405)\)/i.test(message),
+      );
+
+      if (retryableEndpointFailure) {
+        dataStore.addLog({
+          level: "warning",
+          service: "jira",
+          action: "query_issues_fallback_empty",
+          message:
+            "Jira search endpoints unavailable (deprecated or disabled); returning empty issue list.",
+          details: {
+            jql,
+            errors: attemptErrors,
+          },
+        });
+
+        return {
+          issues: [],
+          total: 0,
+          warning:
+            "Jira search endpoint unavailable; returned empty issues list.",
+        };
+      }
+
+      throw new Error(
+        attemptErrors[attemptErrors.length - 1] || "Jira search failed",
+      );
+    }
 
     const issues = parseBodyAsList(searchResult.issues);
     const total =
@@ -2521,11 +2758,42 @@ const handlers: Record<string, MCPHandler> = {
       ? Math.max(1, Math.min(100, maxResultsRaw))
       : 20;
 
-    const response = await gmailApiRequest(
-      config,
-      "GET",
-      `/messages?q=${encodeURIComponent(query)}&maxResults=${maxResults}`,
-    );
+    let response: JsonRecord;
+    try {
+      response = await gmailApiRequest(
+        config,
+        "GET",
+        `/messages?q=${encodeURIComponent(query)}&maxResults=${maxResults}`,
+      );
+    } catch (error) {
+      const guidedError = withGmailPermissionGuidance(error, "list_messages");
+
+      if (/gmail request failed \(403\)/i.test(guidedError.message)) {
+        dataStore.addLog({
+          level: "warning",
+          service: "gmail",
+          action: "gmail_list_messages_fallback_empty",
+          message:
+            "Gmail denied message listing; returning empty message list and continuing execution.",
+          details: {
+            query,
+            reason: guidedError.message,
+            requiredScopes: getGmailRequiredScopes("list_messages"),
+          },
+        });
+
+        return {
+          query,
+          resultSizeEstimate: 0,
+          messages: [],
+          warning:
+            "Gmail list access denied (403). Reconnect Gmail with gmail.readonly scope.",
+          requiredScopes: getGmailRequiredScopes("list_messages"),
+        };
+      }
+
+      throw guidedError;
+    }
 
     const messages = parseBodyAsList(response.messages).map((entry) => {
       const message = parseBodyAsRecord(entry);
@@ -2564,9 +2832,14 @@ const handlers: Record<string, MCPHandler> = {
       ...(html ? { html } : { text: body }),
     });
 
-    const response = await gmailApiRequest(config, "POST", "/messages/send", {
-      raw,
-    });
+    let response: JsonRecord;
+    try {
+      response = await gmailApiRequest(config, "POST", "/messages/send", {
+        raw,
+      });
+    } catch (error) {
+      throw withGmailPermissionGuidance(error, "send_message");
+    }
 
     dataStore.addLog({
       level: "info",
@@ -2604,11 +2877,16 @@ const handlers: Record<string, MCPHandler> = {
       ...(html ? { html } : { text: body }),
     });
 
-    const response = await gmailApiRequest(config, "POST", "/drafts", {
-      message: {
-        raw,
-      },
-    });
+    let response: JsonRecord;
+    try {
+      response = await gmailApiRequest(config, "POST", "/drafts", {
+        message: {
+          raw,
+        },
+      });
+    } catch (error) {
+      throw withGmailPermissionGuidance(error, "create_draft");
+    }
 
     const draft = parseBodyAsRecord(response);
     const draftMessage = parseBodyAsRecord(draft.message);
@@ -2977,6 +3255,390 @@ const handlers: Record<string, MCPHandler> = {
     };
   },
 
+  "github.listRepositories": async (params) => {
+    const payload = params as JsonRecord;
+    const config = getGitHubConfig(payload);
+    const limitRaw = Number(payload.limit ?? payload.maxResults ?? 20);
+    const limit = Number.isFinite(limitRaw)
+      ? Math.max(1, Math.min(100, Math.floor(limitRaw)))
+      : 20;
+
+    const reposResponse = await githubRequestOrThrow(
+      config,
+      "GET",
+      `/user/repos?per_page=${limit}&sort=updated&direction=desc`,
+    );
+
+    const repos = parseBodyAsList(reposResponse).map((entry) => {
+      const item = parseBodyAsRecord(entry);
+      return {
+        id: item.id,
+        name: pickString(item, ["name"]),
+        full_name: pickString(item, ["full_name"]),
+        private: Boolean(item.private),
+        default_branch: pickString(item, ["default_branch"]),
+        html_url: pickString(item, ["html_url"]),
+      };
+    });
+
+    return {
+      repositories: repos,
+      count: repos.length,
+    };
+  },
+
+  "github.checkConnection": async (params) => {
+    const payload = params as JsonRecord;
+
+    try {
+      const config = getGitHubConfig(payload);
+      const user = await githubRequestOrThrow(config, "GET", "/user");
+
+      return {
+        available: true,
+        base_url: config.baseUrl,
+        account: {
+          login: pickString(user, ["login"]),
+          id: user.id,
+          name: pickString(user, ["name"]),
+        },
+        checked_at: new Date().toISOString(),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      return {
+        available: false,
+        error: message,
+        checked_at: new Date().toISOString(),
+      };
+    }
+  },
+
+  "github.getBranch": async (params) => {
+    const payload = params as JsonRecord;
+    const config = getGitHubConfig(payload);
+    const repo = await resolveRepository(payload, config);
+    const branch = resolveRequiredBranchName(payload);
+
+    const branchInfo = await githubRequestOrThrow(
+      config,
+      "GET",
+      `/repos/${repo}/branches/${encodeURIComponent(branch)}`,
+    );
+
+    const commit = parseBodyAsRecord(branchInfo.commit);
+
+    return {
+      repo,
+      name: pickString(branchInfo, ["name"]) || branch,
+      protected: Boolean(branchInfo.protected),
+      sha: pickString(commit, ["sha"]),
+      url: `https://github.com/${repo}/tree/${branch}`,
+    };
+  },
+
+  "github.deleteBranch": async (params) => {
+    const payload = params as JsonRecord;
+    const config = getGitHubConfig(payload);
+    const repo = await resolveRepository(payload, config);
+    const branch = resolveRequiredBranchName(payload);
+
+    const result = await githubRequest(
+      config,
+      "DELETE",
+      `/repos/${repo}/git/refs/heads/${encodeURIComponent(branch)}`,
+    );
+
+    if (result.status === 404) {
+      return {
+        repo,
+        branch,
+        deleted: false,
+        existed: false,
+      };
+    }
+
+    if (result.status < 200 || result.status >= 300) {
+      throw new Error(
+        `GitHub delete branch failed (${result.status}): ${normalizeErrorDetail(
+          result.payload,
+          "Unknown GitHub error",
+        )}`,
+      );
+    }
+
+    dataStore.addLog({
+      level: "info",
+      service: "github",
+      action: "delete_branch",
+      message: `Deleted branch ${branch} in ${repo}`,
+      details: { repo, branch },
+    });
+
+    return {
+      repo,
+      branch,
+      deleted: true,
+      existed: true,
+    };
+  },
+
+  "github.mergePullRequest": async (params) => {
+    const payload = params as JsonRecord;
+    const config = getGitHubConfig(payload);
+    const repo = await resolveRepository(payload, config);
+    const pullNumber = resolvePullRequestNumber(payload);
+    const commitTitle = pickString(payload, ["commit_title", "commitTitle"]);
+    const commitMessage = pickString(payload, [
+      "commit_message",
+      "commitMessage",
+      "message",
+    ]);
+    const methodRaw =
+      pickString(payload, ["merge_method", "mergeMethod", "method"]) ||
+      "squash";
+    const mergeMethod = ["merge", "squash", "rebase"].includes(methodRaw)
+      ? methodRaw
+      : "squash";
+
+    const mergeResult = await githubRequest(
+      config,
+      "PUT",
+      `/repos/${repo}/pulls/${pullNumber}/merge`,
+      {
+        ...(commitTitle ? { commit_title: commitTitle } : {}),
+        ...(commitMessage ? { commit_message: commitMessage } : {}),
+        merge_method: mergeMethod,
+      },
+    );
+
+    if (mergeResult.status < 200 || mergeResult.status >= 300) {
+      throw new Error(
+        `GitHub merge pull request failed (${mergeResult.status}): ${normalizeErrorDetail(
+          mergeResult.payload,
+          "Unknown GitHub error",
+        )}`,
+      );
+    }
+
+    const mergePayload = parseBodyAsRecord(mergeResult.payload);
+
+    dataStore.addLog({
+      level: "info",
+      service: "github",
+      action: "merge_pull_request",
+      message: `Merged PR #${pullNumber} in ${repo}`,
+      details: { repo, pullNumber, mergeMethod },
+    });
+
+    return {
+      repo,
+      pull_number: pullNumber,
+      merged: Boolean(mergePayload.merged),
+      message: pickString(mergePayload, ["message"]),
+      sha: pickString(mergePayload, ["sha"]),
+      merge_method: mergeMethod,
+    };
+  },
+
+  "github.triggerWorkflow": async (params) => {
+    const payload = params as JsonRecord;
+    const config = getGitHubConfig(payload);
+    const repo = await resolveRepository(payload, config);
+    const workflowId = resolveWorkflowIdentifier(payload);
+    const ref =
+      pickString(payload, ["ref", "branch", "branch_name", "head"]) ||
+      resolveBaseBranch(payload);
+    const inputs = asRecord(payload.inputs);
+
+    const dispatchResult = await githubRequest(
+      config,
+      "POST",
+      `/repos/${repo}/actions/workflows/${encodeURIComponent(workflowId)}/dispatches`,
+      {
+        ref,
+        ...(Object.keys(inputs).length > 0 ? { inputs } : {}),
+      },
+    );
+
+    if (
+      dispatchResult.status !== 204 &&
+      (dispatchResult.status < 200 || dispatchResult.status >= 300)
+    ) {
+      throw new Error(
+        `GitHub trigger workflow failed (${dispatchResult.status}): ${normalizeErrorDetail(
+          dispatchResult.payload,
+          "Unknown GitHub error",
+        )}`,
+      );
+    }
+
+    dataStore.addLog({
+      level: "info",
+      service: "github",
+      action: "trigger_workflow",
+      message: `Triggered workflow ${workflowId} on ${repo}@${ref}`,
+      details: { repo, workflowId, ref },
+    });
+
+    return {
+      accepted: true,
+      repo,
+      workflow_id: workflowId,
+      ref,
+    };
+  },
+
+  "github.getWorkflowStatus": async (params) => {
+    const payload = params as JsonRecord;
+    const config = getGitHubConfig(payload);
+    const repo = await resolveRepository(payload, config);
+    const runId = resolveNumericParam(payload, [
+      "run_id",
+      "runId",
+      "workflow_run_id",
+      "workflowRunId",
+    ]);
+
+    if (runId) {
+      const run = await githubRequestOrThrow(
+        config,
+        "GET",
+        `/repos/${repo}/actions/runs/${runId}`,
+      );
+
+      return {
+        repo,
+        run_id: run.id,
+        name: run.name,
+        workflow_id: run.workflow_id,
+        status: run.status,
+        conclusion: run.conclusion,
+        event: run.event,
+        head_branch: run.head_branch,
+        html_url: run.html_url,
+      };
+    }
+
+    const workflowId = pickString(payload, [
+      "workflow_id",
+      "workflowId",
+      "workflow",
+      "workflow_name",
+      "workflowName",
+    ]);
+    const branch = pickString(payload, ["branch", "branch_name", "ref"]);
+    const event = pickString(payload, ["event"]);
+    const limitRaw = Number(payload.limit ?? payload.maxResults ?? 10);
+    const limit = Number.isFinite(limitRaw)
+      ? Math.max(1, Math.min(50, Math.floor(limitRaw)))
+      : 10;
+
+    const query = new URLSearchParams({
+      per_page: String(limit),
+      ...(branch ? { branch } : {}),
+      ...(event ? { event } : {}),
+    }).toString();
+
+    const runsPath = workflowId
+      ? `/repos/${repo}/actions/workflows/${encodeURIComponent(workflowId)}/runs?${query}`
+      : `/repos/${repo}/actions/runs?${query}`;
+
+    const runsPayload = await githubRequestOrThrow(config, "GET", runsPath);
+    const runs = parseBodyAsList(runsPayload.workflow_runs).map((entry) => {
+      const run = parseBodyAsRecord(entry);
+      return {
+        run_id: run.id,
+        name: run.name,
+        workflow_id: run.workflow_id,
+        status: run.status,
+        conclusion: run.conclusion,
+        event: run.event,
+        head_branch: run.head_branch,
+        created_at: run.created_at,
+        updated_at: run.updated_at,
+        html_url: run.html_url,
+      };
+    });
+
+    return {
+      repo,
+      workflow_id: workflowId,
+      total_count:
+        typeof runsPayload.total_count === "number"
+          ? runsPayload.total_count
+          : runs.length,
+      latest: runs[0] || null,
+      runs,
+    };
+  },
+
+  "github.listenRepoEvents": async (params) => {
+    const payload = params as JsonRecord;
+    const config = getGitHubConfig(payload);
+    const repo = await resolveRepository(payload, config);
+    const limitRaw = Number(payload.limit ?? payload.maxResults ?? 30);
+    const limit = Number.isFinite(limitRaw)
+      ? Math.max(1, Math.min(100, Math.floor(limitRaw)))
+      : 30;
+
+    const requestedTypes = new Set(
+      parseBodyAsList(payload.event_types ?? payload.events ?? payload.types)
+        .map((entry) => String(entry).trim().toLowerCase())
+        .filter(Boolean),
+    );
+
+    if (requestedTypes.size === 0) {
+      requestedTypes.add("push");
+      requestedTypes.add("pull_request");
+      requestedTypes.add("issue");
+    }
+
+    const eventsPayload = await githubRequestOrThrow(
+      config,
+      "GET",
+      `/repos/${repo}/events?per_page=${limit}`,
+    );
+
+    const eventTypeMap: Record<string, "push" | "pull_request" | "issue" | "other"> = {
+      PushEvent: "push",
+      PullRequestEvent: "pull_request",
+      IssuesEvent: "issue",
+    };
+
+    const events = parseBodyAsList(eventsPayload).map((entry) => {
+      const event = parseBodyAsRecord(entry);
+      const actor = parseBodyAsRecord(event.actor);
+      const payloadData = parseBodyAsRecord(event.payload);
+      const simpleType = eventTypeMap[String(event.type)] || "other";
+
+      return {
+        id: event.id,
+        type: simpleType,
+        github_type: event.type,
+        action: pickString(payloadData, ["action"]),
+        actor: {
+          login: pickString(actor, ["login"]),
+          id: actor.id,
+        },
+        created_at: event.created_at,
+        ref: pickString(payloadData, ["ref"]),
+        head: pickString(payloadData, ["head"]),
+      };
+    });
+
+    const filtered = events.filter((event) => requestedTypes.has(event.type));
+
+    return {
+      repo,
+      mode: "polling",
+      events: filtered,
+      count: filtered.length,
+      latest_event_at: filtered[0]?.created_at || null,
+      note: "GitHub events are retrieved via polling endpoint. Use webhooks for real-time push delivery.",
+    };
+  },
+
   // PostgreSQL methods (mocked for now)
   "postgres.query": async (params) => {
     await simulateDelay(50, 200);
@@ -3078,11 +3740,19 @@ export async function executeNode(
     },
     github: {
       "create-branch": "github.createBranch",
+      "get-branch": "github.getBranch",
+      "delete-branch": "github.deleteBranch",
       "create-file": "github.createOrUpdateFile",
       "update-file": "github.createOrUpdateFile",
       "commit-file": "github.createOrUpdateFile",
       "create-issue": "github.createIssue",
       "create-pr": "github.createPullRequest",
+      "merge-pr": "github.mergePullRequest",
+      "trigger-workflow": "github.triggerWorkflow",
+      "get-workflow-status": "github.getWorkflowStatus",
+      "listen-repo-events": "github.listenRepoEvents",
+      "check-connection": "github.checkConnection",
+      "list-repositories": "github.listRepositories",
       "on-push": "github.getRepository",
       "get-repo": "github.getRepository",
     },
@@ -3164,6 +3834,14 @@ export function getAvailableMethods(): {
       description: "Create a branch in a GitHub repository",
     },
     {
+      method: "github.getBranch",
+      description: "Get branch details from a GitHub repository",
+    },
+    {
+      method: "github.deleteBranch",
+      description: "Delete a branch in a GitHub repository",
+    },
+    {
       method: "github.createOrUpdateFile",
       description:
         "Create or update a file in a GitHub branch (creates a commit)",
@@ -3172,6 +3850,30 @@ export function getAvailableMethods(): {
     {
       method: "github.createPullRequest",
       description: "Create a GitHub pull request",
+    },
+    {
+      method: "github.mergePullRequest",
+      description: "Merge a GitHub pull request",
+    },
+    {
+      method: "github.triggerWorkflow",
+      description: "Trigger a GitHub Actions workflow dispatch",
+    },
+    {
+      method: "github.getWorkflowStatus",
+      description: "Get GitHub Actions workflow run status",
+    },
+    {
+      method: "github.listenRepoEvents",
+      description: "Poll GitHub repository events (push, PR, issues)",
+    },
+    {
+      method: "github.listRepositories",
+      description: "List repositories available to the GitHub token",
+    },
+    {
+      method: "github.checkConnection",
+      description: "Check GitHub connection availability and token validity",
     },
     {
       method: "github.getRepository",

@@ -12,7 +12,16 @@ const TEST_LOGIN_PASSWORD = "Test@123";
 const TEST_LOGIN_USER_ID = "test-login-user";
 const TEST_LOGIN_USER_ROLE: IUser["role"] = "admin";
 const GOOGLE_BASE_AUTH_SCOPES = ["profile", "email"] as const;
+const GOOGLE_GMAIL_READ_SCOPE =
+  "https://www.googleapis.com/auth/gmail.readonly";
 const GOOGLE_GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
+const GOOGLE_GMAIL_COMPOSE_SCOPE =
+  "https://www.googleapis.com/auth/gmail.compose";
+const GOOGLE_GMAIL_SCOPES = [
+  GOOGLE_GMAIL_READ_SCOPE,
+  GOOGLE_GMAIL_SEND_SCOPE,
+  GOOGLE_GMAIL_COMPOSE_SCOPE,
+] as const;
 const GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_GMAIL_SEND_URL =
   "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
@@ -910,11 +919,11 @@ googleAuthRoutes.get(
   }),
 );
 
-// GET /auth/google/gmail - Re-consent with Gmail send scope
+// GET /auth/google/gmail - Re-consent with Gmail read/send/compose scopes
 googleAuthRoutes.get(
   "/google/gmail",
   authenticateGoogle({
-    scope: [...GOOGLE_BASE_AUTH_SCOPES, GOOGLE_GMAIL_SEND_SCOPE],
+    scope: [...GOOGLE_BASE_AUTH_SCOPES, ...GOOGLE_GMAIL_SCOPES],
     accessType: "offline",
     prompt: "consent",
     includeGrantedScopes: true,
