@@ -21,7 +21,6 @@ router.get("/", async (req, res) => {
       | "postgres"
       | "google_sheets"
       | "gmail"
-      | "aws"
       | "system"
       | undefined,
     search: search as string | undefined,
@@ -130,7 +129,6 @@ router.get("/stats", async (_req, res) => {
       postgres: 0,
       google_sheets: 0,
       gmail: 0,
-      aws: 0,
       system: 0,
     },
     last24Hours: 0,

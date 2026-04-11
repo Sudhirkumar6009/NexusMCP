@@ -5,13 +5,7 @@ export type ServiceCategory =
   | "data_analytics"
   | "devops";
 
-export type ServiceId =
-  | "jira"
-  | "slack"
-  | "github"
-  | "google_sheets"
-  | "gmail"
-  | "aws";
+export type ServiceId = "jira" | "slack" | "github" | "google_sheets" | "gmail";
 
 export type ConnectionStatus =
   | "connected"
@@ -49,10 +43,6 @@ export interface IntegrationCredentials {
   baseUrl?: string;
   spreadsheetId?: string;
   googleServiceAccountJson?: string;
-  accessKeyId?: string;
-  secretAccessKey?: string;
-  sessionToken?: string;
-  region?: string;
   scopes: string[];
   expiresAt?: Date;
 }

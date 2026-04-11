@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class SheetsOperation(BaseModel):
     """A Google Sheets operation to execute."""
 
-    operation: str  # read_rows, insert_row, update_row, append_logs
+    operation: str  # get_rows, add_row, update_row, delete_row, query_rows, list_sheets
     arguments: Dict[str, Any] = Field(default_factory=dict)
     description: str = ""
     depends_on: List[str] = Field(default_factory=list)
@@ -36,16 +36,19 @@ class GoogleSheetsAgent(BaseAgent):
     Google Sheets Agent - Specialized for spreadsheet/database style operations.
 
     Supported Operations:
-    1. read_rows
-    2. insert_row
+    1. add_row
+    2. get_rows
     3. update_row
-    4. append_logs
+    4. delete_row
+    5. query_rows
+    6. list_sheets
     """
 
     name = "google-sheets-agent"
 
     TOOL_MAPPINGS = {
-        "read_rows": [
+        "get_rows": [
+            "google_sheets.get_rows",
             "google_sheets.read_sheet",
             "google_sheets_read_sheet",
             "google_sheets.read_rows",
@@ -53,14 +56,17 @@ class GoogleSheetsAgent(BaseAgent):
             "sheets_read_range",
             "sheets.read_sheet",
             "sheets_read",
+            "sheets.get_rows",
         ],
-        "insert_row": [
+        "add_row": [
+            "google_sheets.add_row",
             "google_sheets.insert_row",
             "google_sheets.append_rows",
             "google_sheets.append_row",
             "sheets.append_row",
             "sheets_append_row",
             "sheets.insert_row",
+            "sheets.add_row",
         ],
         "update_row": [
             "google_sheets.update_row",
@@ -70,11 +76,20 @@ class GoogleSheetsAgent(BaseAgent):
             "sheets.update_cells",
             "sheets_update_cells",
         ],
-        "append_logs": [
-            "google_sheets.append_logs",
-            "google_sheets.append_rows",
-            "sheets.append_row",
-            "sheets_append_row",
+        "delete_row": [
+            "google_sheets.delete_row",
+            "sheets.delete_row",
+            "sheets_delete_row",
+        ],
+        "query_rows": [
+            "google_sheets.query_rows",
+            "sheets.query_rows",
+            "sheets_query_rows",
+        ],
+        "list_sheets": [
+            "google_sheets.list_sheets",
+            "sheets.list_sheets",
+            "sheets_list_sheets",
         ],
     }
 
@@ -130,33 +145,42 @@ Available Google Sheets Tools:
 {self._format_tools(tools)}
 
 GOOGLE SHEETS OPERATIONS:
-1. read_rows
+1. get_rows
    - Read records or ranges
    - Arguments: sheet_id, range
 
-2. insert_row
+2. add_row
    - Insert/append a data row
    - Arguments: sheet_id, sheet_name (optional), row_data
 
 3. update_row
    - Update existing row/range values
-   - Arguments: sheet_id, range, values
+    - Arguments: sheet_id, row_index (or range), values
 
-4. append_logs
-   - Append operational logs/audit rows
-   - Arguments: sheet_id, sheet_name, row_data
+4. delete_row
+    - Delete a row by index
+    - Arguments: sheet_id, sheet_name (optional), row_index
+
+5. query_rows
+    - Filter rows by query/condition
+    - Arguments: sheet_id, range (optional), query/filters
+
+6. list_sheets
+    - List tabs/sheets in the spreadsheet
+    - Arguments: sheet_id
 
 RULES:
 1. Extract sheet id, sheet name, and A1 ranges if present
-2. If request says "log" or "audit", prefer append_logs
-3. If request says "read/list/fetch", use read_rows
+2. If request says "find/filter/query", prefer query_rows
+3. If request says "read/list/fetch rows", use get_rows
+4. If request says "list sheets/tabs", use list_sheets
 4. Return ONLY valid JSON
 
 OUTPUT FORMAT:
 {{
   "operations": [
     {{
-      "operation": "read_rows",
+            "operation": "get_rows",
       "arguments": {{ "sheet_id": "abc123", "range": "A1:D50" }},
       "description": "Read data rows"
     }}
@@ -222,29 +246,68 @@ OUTPUT FORMAT:
                 if key in context and key not in extracted_params and isinstance(context[key], str):
                     extracted_params[key] = context[key]
 
-        read_requested = any(
+        get_requested = any(
             token in normalized
             for token in ["read", "fetch", "get rows", "list rows", "query", "show"]
+        )
+        query_requested = any(
+            token in normalized
+            for token in ["query", "filter", "find", "where", "critical bugs"]
         )
         update_requested = any(
             token in normalized
             for token in ["update", "modify", "change", "edit", "set value"]
         )
+        delete_requested = any(
+            token in normalized
+            for token in ["delete row", "remove row", "drop row"]
+        )
+        list_sheets_requested = any(
+            token in normalized
+            for token in ["list sheets", "list tabs", "sheet names", "available sheets"]
+        )
         append_log_requested = any(
             token in normalized
             for token in ["append log", "audit", "log", "record event", "append audit"]
         )
-        insert_requested = any(
+        add_requested = any(
             token in normalized
             for token in ["insert", "add row", "create row", "append row", "append"]
         )
 
-        if read_requested:
-            tool_name = self._find_tool("read_rows", tools)
+        if list_sheets_requested:
+            tool_name = self._find_tool("list_sheets", tools)
             if tool_name:
                 operations.append(
                     SheetsOperation(
-                        operation="read_rows",
+                        operation="list_sheets",
+                        arguments={
+                            "sheet_id": extracted_params.get("sheet_id", ""),
+                        },
+                        description="List available sheets/tabs",
+                    )
+                )
+
+        if query_requested:
+            tool_name = self._find_tool("query_rows", tools)
+            if tool_name:
+                operations.append(
+                    SheetsOperation(
+                        operation="query_rows",
+                        arguments={
+                            "sheet_id": extracted_params.get("sheet_id", ""),
+                            "range": extracted_params.get("range", "A1:Z100"),
+                        },
+                        description="Query rows from Google Sheets",
+                    )
+                )
+
+        if get_requested and not query_requested:
+            tool_name = self._find_tool("get_rows", tools)
+            if tool_name:
+                operations.append(
+                    SheetsOperation(
+                        operation="get_rows",
                         arguments={
                             "sheet_id": extracted_params.get("sheet_id", ""),
                             "range": extracted_params.get("range", "A1:Z100"),
@@ -268,30 +331,32 @@ OUTPUT FORMAT:
                     )
                 )
 
-        if append_log_requested:
-            tool_name = self._find_tool("append_logs", tools)
+        if delete_requested:
+            tool_name = self._find_tool("delete_row", tools)
             if tool_name:
                 operations.append(
                     SheetsOperation(
-                        operation="append_logs",
-                        arguments={
-                            "sheet_id": extracted_params.get("sheet_id", ""),
-                            "sheet_name": extracted_params.get("sheet_name", "Logs"),
-                            "row_data": [],
-                        },
-                        description="Append log row to Google Sheets",
-                    )
-                )
-
-        if insert_requested and not append_log_requested:
-            tool_name = self._find_tool("insert_row", tools)
-            if tool_name:
-                operations.append(
-                    SheetsOperation(
-                        operation="insert_row",
+                        operation="delete_row",
                         arguments={
                             "sheet_id": extracted_params.get("sheet_id", ""),
                             "sheet_name": extracted_params.get("sheet_name", "Sheet1"),
+                            "row_index": 2,
+                        },
+                        description="Delete row from Google Sheets",
+                    )
+                )
+
+        if add_requested or append_log_requested:
+            tool_name = self._find_tool("add_row", tools)
+            if tool_name:
+                operations.append(
+                    SheetsOperation(
+                        operation="add_row",
+                        arguments={
+                            "sheet_id": extracted_params.get("sheet_id", ""),
+                            "sheet_name": extracted_params.get(
+                                "sheet_name", "Logs" if append_log_requested else "Sheet1"
+                            ),
                             "row_data": [],
                         },
                         description="Insert/append data row",
@@ -299,11 +364,11 @@ OUTPUT FORMAT:
                 )
 
         if not operations:
-            fallback_tool = self._find_tool("read_rows", tools)
+            fallback_tool = self._find_tool("get_rows", tools)
             if fallback_tool:
                 operations.append(
                     SheetsOperation(
-                        operation="read_rows",
+                        operation="get_rows",
                         arguments={
                             "sheet_id": extracted_params.get("sheet_id", ""),
                             "range": extracted_params.get("range", "A1:Z100"),
@@ -319,15 +384,33 @@ OUTPUT FORMAT:
         )
 
     def _extract_sheet_id(self, prompt: str) -> str:
+        url_match = re.search(
+            r"https?://docs\.google\.com/spreadsheets/d/([a-zA-Z0-9_-]{20,})",
+            prompt,
+            re.IGNORECASE,
+        )
+        if url_match:
+            return url_match.group(1)
+
         patterns = [
-            r"(?:sheet|spreadsheet)(?:\s+id)?\s*[:=]?\s*([a-zA-Z0-9_-]{8,})",
-            r"\b([a-zA-Z0-9_-]{20,})\b",
+            r"(?:sheet|spreadsheet)(?:\s+id)?\s*[:=]\s*([a-zA-Z0-9_-]{20,})",
         ]
         for pattern in patterns:
             match = re.search(pattern, prompt, re.IGNORECASE)
-            if match:
-                return match.group(1)
+            candidate = match.group(1) if match else ""
+            if candidate and self._is_probable_sheet_id(candidate):
+                return candidate
         return ""
+
+    def _is_probable_sheet_id(self, value: str) -> bool:
+        candidate = (value or "").strip()
+        if len(candidate) < 20:
+            return False
+        if not re.match(r"^[A-Za-z0-9_-]+$", candidate):
+            return False
+        if re.match(r"^[A-Z][A-Z0-9]+-\d+(?:-|$)", candidate):
+            return False
+        return True
 
     def _extract_range(self, prompt: str) -> str:
         range_match = re.search(

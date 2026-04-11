@@ -161,7 +161,6 @@ class DefaultFlowOrchestrator:
         "slack": ["slack", "message", "channel", "notify", "notification", "post", "dm", "direct message"],
         "google_sheets": ["sheet", "sheets", "spreadsheet", "google sheet", "row", "cell", "append", "database", "db", "log"],
         "gmail": ["gmail", "email", "mail", "send email", "inbox", "draft"],
-        "aws": ["aws", "lambda", "s3", "ec2", "cloud"],
     }
 
     SERVICE_ALIASES = {
@@ -170,7 +169,6 @@ class DefaultFlowOrchestrator:
         "slack": ["slack"],
         "google_sheets": ["google_sheets", "google-sheets", "google sheets", "sheets", "sheet"],
         "gmail": ["gmail", "google mail", "email", "mail"],
-        "aws": ["aws", "amazon web services"],
     }
 
     def __init__(self, gemini: GeminiClient):

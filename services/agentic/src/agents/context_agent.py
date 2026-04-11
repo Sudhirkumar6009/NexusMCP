@@ -16,7 +16,6 @@ CONNECTOR_KEYWORDS: Dict[str, List[str]] = {
     "github": ["github", "pull request", "pr", "repository", "branch"],
     "google_sheets": ["sheet", "sheets", "spreadsheet", "row", "cell"],
     "gmail": ["gmail", "email", "mail", "inbox"],
-    "aws": ["aws", "cloud", "lambda", "stack", "infrastructure"],
 }
 
 CONNECTOR_ALIASES: Dict[str, List[str]] = {
@@ -25,7 +24,6 @@ CONNECTOR_ALIASES: Dict[str, List[str]] = {
     "github": ["github"],
     "google_sheets": ["google sheets", "google_sheets", "sheets"],
     "gmail": ["gmail", "google mail"],
-    "aws": ["aws", "amazon web services"],
 }
 
 EXCLUSION_TERMS = ("skip", "exclude", "except", "without", "omit", "ignore")

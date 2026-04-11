@@ -53,14 +53,7 @@ export interface NodeExecutionResult {
 // Integration Types
 export interface Integration {
   id: string;
-  service:
-    | "jira"
-    | "slack"
-    | "github"
-    | "google_sheets"
-    | "gmail"
-    | "aws"
-    | "postgres";
+  service: "jira" | "slack" | "github" | "google_sheets" | "gmail" | "postgres";
   name: string;
   description: string;
   status: "connected" | "disconnected" | "error";
@@ -78,10 +71,6 @@ export interface IntegrationCredentials {
   username?: string;
   spreadsheetId?: string;
   googleServiceAccountJson?: string;
-  accessKeyId?: string;
-  secretAccessKey?: string;
-  sessionToken?: string;
-  region?: string;
   password?: string;
   database?: string;
   host?: string;
@@ -108,7 +97,6 @@ export interface AuditLog {
     | "github"
     | "google_sheets"
     | "gmail"
-    | "aws"
     | "postgres"
     | "system";
   action: string;

@@ -181,15 +181,36 @@ const METHOD_ALIASES: Record<string, string> = {
   "google_sheets.append_rows": "sheets.appendRow",
   "google_sheets.append_row": "sheets.appendRow",
   "google_sheets.insert_row": "sheets.appendRow",
+  "google_sheets.add_row": "sheets.addRow",
+  google_sheets_add_row: "sheets.addRow",
   "sheets.append_row": "sheets.appendRow",
   sheets_append_row: "sheets.appendRow",
   "sheets.insert_row": "sheets.appendRow",
+  "sheets.add_row": "sheets.addRow",
+  sheets_add_row: "sheets.addRow",
+  "google_sheets.get_rows": "sheets.getRows",
+  google_sheets_get_rows: "sheets.getRows",
+  "sheets.get_rows": "sheets.getRows",
+  sheets_get_rows: "sheets.getRows",
   "google_sheets.update_cells": "sheets.updateCells",
-  "google_sheets.update_row": "sheets.updateCells",
+  "google_sheets.update_row": "sheets.updateRow",
+  google_sheets_update_row: "sheets.updateRow",
   "sheets.update_cells": "sheets.updateCells",
   sheets_update_cells: "sheets.updateCells",
-  "sheets.update_row": "sheets.updateCells",
-  sheets_update_row: "sheets.updateCells",
+  "sheets.update_row": "sheets.updateRow",
+  sheets_update_row: "sheets.updateRow",
+  "google_sheets.delete_row": "sheets.deleteRow",
+  google_sheets_delete_row: "sheets.deleteRow",
+  "sheets.delete_row": "sheets.deleteRow",
+  sheets_delete_row: "sheets.deleteRow",
+  "google_sheets.query_rows": "sheets.queryRows",
+  google_sheets_query_rows: "sheets.queryRows",
+  "sheets.query_rows": "sheets.queryRows",
+  sheets_query_rows: "sheets.queryRows",
+  "google_sheets.list_sheets": "sheets.listSheets",
+  google_sheets_list_sheets: "sheets.listSheets",
+  "sheets.list_sheets": "sheets.listSheets",
+  sheets_list_sheets: "sheets.listSheets",
   "sheets.append_rows": "sheets.appendRow",
   sheets_append_rows: "sheets.appendRow",
   "sheets.write_cells": "sheets.updateCells",
@@ -518,6 +539,58 @@ function isPlaceholderValue(raw: string | undefined): boolean {
   return false;
 }
 
+function extractSpreadsheetIdFromText(
+  raw: string | undefined,
+): string | undefined {
+  if (!raw) {
+    return undefined;
+  }
+
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const directUrlMatch = trimmed.match(
+    /\/spreadsheets\/d\/([A-Za-z0-9_-]{20,})/i,
+  );
+  if (directUrlMatch?.[1]) {
+    return directUrlMatch[1];
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return undefined;
+  }
+
+  return trimmed;
+}
+
+function isLikelySpreadsheetId(raw: string | undefined): boolean {
+  if (!raw) {
+    return false;
+  }
+
+  const candidate = raw.trim();
+  if (!candidate || isPlaceholderValue(candidate)) {
+    return false;
+  }
+
+  if (!/^[A-Za-z0-9_-]+$/.test(candidate)) {
+    return false;
+  }
+
+  if (candidate.length < 20) {
+    return false;
+  }
+
+  // Reject issue/branch-like identifiers such as KAN-9-fix-readme-line-20.
+  if (/^[A-Z][A-Z0-9]+-\d+(?:-|$)/.test(candidate)) {
+    return false;
+  }
+
+  return true;
+}
+
 async function parseResponseBody(response: Awaited<ReturnType<typeof fetch>>) {
   const raw = await response.text();
   if (!raw) {
@@ -709,9 +782,12 @@ function buildGmailRawMessage(args: {
 
   let rawMessage = "";
   if (attachments.length === 0) {
-    rawMessage = [...headers, `Content-Type: ${bodyContentType}`, "", body].join(
-      "\r\n",
-    );
+    rawMessage = [
+      ...headers,
+      `Content-Type: ${bodyContentType}`,
+      "",
+      body,
+    ].join("\r\n");
   } else {
     const boundary = `nexusmcp_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
     const lines: string[] = [
@@ -726,9 +802,7 @@ function buildGmailRawMessage(args: {
     ];
 
     for (const attachment of attachments) {
-      const encoded = (
-        attachment.contentBase64 || attachment.data || ""
-      )
+      const encoded = (attachment.contentBase64 || attachment.data || "")
         .trim()
         .replace(/-/g, "+")
         .replace(/_/g, "/");
@@ -1267,26 +1341,50 @@ async function getSheetsConfig(params: JsonRecord): Promise<SheetsConfig> {
   const integration = getConnectedIntegration("google_sheets");
   const credentials = asRecord(integration.credentials);
 
-  const spreadsheetId = (
-    pickString(params, [
-      "sheet_id",
-      "spreadsheetId",
-      "spreadsheet_id",
-      "sheetId",
-    ]) ||
-    pickString(credentials, [
-      "sheet_id",
-      "spreadsheetId",
-      "spreadsheet_id",
-      "sheetId",
-      "spreadsheetId",
-    ]) ||
-    process.env.GOOGLE_SHEETS_SPREADSHEET_ID ||
-    process.env.SPREADSHEET_ID ||
-    ""
-  ).trim();
+  const promptText = pickString(params, ["prompt", "input"]);
+
+  const spreadsheetIdCandidates = [
+    extractSpreadsheetIdFromText(
+      pickString(params, [
+        "sheet_id",
+        "spreadsheetId",
+        "spreadsheet_id",
+        "sheetId",
+        "spreadsheetUrl",
+        "spreadsheet_url",
+      ]),
+    ),
+    extractSpreadsheetIdFromText(
+      pickString(credentials, [
+        "sheet_id",
+        "spreadsheetId",
+        "spreadsheet_id",
+        "sheetId",
+        "spreadsheetUrl",
+        "spreadsheet_url",
+      ]),
+    ),
+    extractSpreadsheetIdFromText(promptText),
+    extractSpreadsheetIdFromText(process.env.GOOGLE_SHEETS_SPREADSHEET_ID),
+    extractSpreadsheetIdFromText(process.env.SPREADSHEET_ID),
+  ].filter((value): value is string => Boolean(value && value.trim()));
+
+  const spreadsheetId =
+    spreadsheetIdCandidates.find((candidate) =>
+      isLikelySpreadsheetId(candidate),
+    ) || "";
 
   if (!spreadsheetId) {
+    const fallbackCandidate = spreadsheetIdCandidates.find(
+      (candidate) => !isPlaceholderValue(candidate),
+    );
+
+    if (fallbackCandidate) {
+      throw new Error(
+        `Google Sheets spreadsheet ID looks invalid ('${fallbackCandidate}'). Provide a real spreadsheet ID or a Google Sheets URL containing /spreadsheets/d/{id}.`,
+      );
+    }
+
     throw new Error(
       "Google Sheets spreadsheet ID is required. Provide spreadsheetId or configure SPREADSHEET_ID/GOOGLE_SHEETS_SPREADSHEET_ID.",
     );
@@ -1605,7 +1703,10 @@ function decodeGmailMessageBody(payload: JsonRecord): string {
     const part = parseBodyAsRecord(partRaw);
     const mimeType = (pickString(part, ["mimeType"]) || "").toLowerCase();
     const nestedBody = decodeGmailMessageBody(part);
-    if (nestedBody && (mimeType.includes("text/plain") || mimeType.includes("text/html"))) {
+    if (
+      nestedBody &&
+      (mimeType.includes("text/plain") || mimeType.includes("text/html"))
+    ) {
       return nestedBody;
     }
     if (nestedBody) {
@@ -3575,6 +3676,37 @@ const handlers: Record<string, MCPHandler> = {
   },
 
   // Google Sheets methods
+  "sheets.listSheets": async (params) => {
+    const payload = params as JsonRecord;
+    const config = await getSheetsConfig(payload);
+
+    const response = await sheetsApiRequest(
+      config,
+      "GET",
+      "?fields=spreadsheetId,spreadsheetUrl,sheets(properties(sheetId,title,index,gridProperties(rowCount,columnCount)))",
+    );
+
+    const sheets = parseBodyAsList(response.sheets).map((entry) => {
+      const sheet = parseBodyAsRecord(entry);
+      const properties = parseBodyAsRecord(sheet.properties);
+      const grid = parseBodyAsRecord(properties.gridProperties);
+      return {
+        id: Number(properties.sheetId ?? 0),
+        title: pickString(properties, ["title"]) || "",
+        index: Number(properties.index ?? 0),
+        rowCount: Number(grid.rowCount ?? 0),
+        columnCount: Number(grid.columnCount ?? 0),
+      };
+    });
+
+    return {
+      sheet_id: config.spreadsheetId,
+      spreadsheet_url: pickString(response, ["spreadsheetUrl"]),
+      sheets,
+      count: sheets.length,
+    };
+  },
+
   "sheets.readRange": async (params) => {
     const payload = params as JsonRecord;
     const config = await getSheetsConfig(payload);
@@ -3599,6 +3731,33 @@ const handlers: Record<string, MCPHandler> = {
       range: pickString(response, ["range"]) || range,
       values: parseBodyAsList(response.values),
       majorDimension: pickString(response, ["majorDimension"]),
+    };
+  },
+
+  "sheets.getRows": async (params) => {
+    const payload = params as JsonRecord;
+    const sheetName =
+      pickString(payload, ["sheet_name", "sheet", "tab"]) || "Sheet1";
+    const range = pickString(payload, ["range"]) || `${sheetName}!A1:ZZ1000`;
+
+    const readResult = asRecord(
+      await handlers["sheets.readRange"]({
+        ...payload,
+        range,
+      }),
+    );
+
+    const values = parseBodyAsList(readResult.values).map((entry) =>
+      Array.isArray(entry) ? entry : [entry],
+    );
+    const headers =
+      values.length > 0 && Array.isArray(values[0]) ? values[0] : [];
+
+    return {
+      ...readResult,
+      headers,
+      rows: values.slice(1),
+      rowCount: Math.max(0, values.length - 1),
     };
   },
 
@@ -3646,6 +3805,88 @@ const handlers: Record<string, MCPHandler> = {
       updatedRows: Number(updates.updatedRows ?? 0),
       updatedCells: Number(updates.updatedCells ?? 0),
     };
+  },
+
+  "sheets.addRow": async (params) => {
+    const payload = params as JsonRecord;
+    const rowInput =
+      payload.row ?? payload.row_data ?? payload.values ?? payload.data;
+    const uniqueByRaw = payload.unique_by ?? payload.uniqueBy;
+
+    const rowRecord = asRecord(rowInput);
+    if (Object.keys(rowRecord).length > 0 && !Array.isArray(rowInput)) {
+      const sheetName =
+        pickString(payload, ["sheet_name", "sheet", "tab"]) || "Sheet1";
+
+      const uniqueBy = Array.isArray(uniqueByRaw)
+        ? uniqueByRaw
+            .map((entry) => String(entry).trim())
+            .filter((entry) => entry.length > 0)
+        : typeof uniqueByRaw === "string" && uniqueByRaw.trim().length > 0
+          ? [uniqueByRaw.trim()]
+          : [];
+
+      if (uniqueBy.length > 0) {
+        const filters = uniqueBy.reduce<JsonRecord>((acc, key) => {
+          if (rowRecord[key] !== undefined && rowRecord[key] !== null) {
+            acc[key] = rowRecord[key];
+          }
+          return acc;
+        }, {});
+
+        if (Object.keys(filters).length > 0) {
+          const existing = asRecord(
+            await handlers["sheets.queryRows"]({
+              ...payload,
+              sheet_name: sheetName,
+              filters,
+              limit: 1,
+            }),
+          );
+
+          if (Number(existing.count ?? 0) > 0) {
+            return {
+              skipped: true,
+              reason: "duplicate",
+              sheet_id: existing.sheet_id,
+              sheet_name: sheetName,
+              filters,
+            };
+          }
+        }
+      }
+
+      const headerRange = `${sheetName}!1:1`;
+      const headerRead = asRecord(
+        await handlers["sheets.readRange"]({
+          ...payload,
+          range: headerRange,
+        }),
+      );
+      const headerRows = parseBodyAsList(headerRead.values);
+      const headers =
+        headerRows.length > 0 && Array.isArray(headerRows[0])
+          ? (headerRows[0] as unknown[])
+          : [];
+
+      const mappedRow =
+        headers.length > 0
+          ? headers.map((header) => {
+              const key = String(header ?? "").trim();
+              return key ? (rowRecord[key] ?? "") : "";
+            })
+          : Object.values(rowRecord);
+
+      return handlers["sheets.appendRow"]({
+        ...payload,
+        row_data: [mappedRow],
+      });
+    }
+
+    return handlers["sheets.appendRow"]({
+      ...payload,
+      row_data: rowInput,
+    });
   },
 
   "sheets.updateCells": async (params) => {
@@ -3743,6 +3984,264 @@ const handlers: Record<string, MCPHandler> = {
       updatedRows: Number(response.updatedRows ?? 0),
       updatedColumns: Number(response.updatedColumns ?? 0),
       updatedCells: Number(response.updatedCells ?? 0),
+    };
+  },
+
+  "sheets.updateRow": async (params) => {
+    const payload = params as JsonRecord;
+    const explicitRange = pickString(payload, ["range"]);
+
+    if (explicitRange) {
+      return handlers["sheets.updateCells"](payload);
+    }
+
+    const sheetName =
+      pickString(payload, ["sheet_name", "sheet", "tab"]) || "Sheet1";
+    const rowIndexRaw = Number(
+      payload.row_index ??
+        payload.row ??
+        payload.row_number ??
+        payload.rowNumber,
+    );
+
+    if (!Number.isFinite(rowIndexRaw) || rowIndexRaw <= 0) {
+      throw new Error(
+        "sheets.update_row requires row_index (or row/row_number) when range is not provided.",
+      );
+    }
+
+    let values = normalizeSheetValues(
+      payload.values ??
+        payload.row_data ??
+        payload.value ??
+        payload.row_data ??
+        [],
+    );
+
+    const rowRecord = asRecord(
+      payload.row_data ?? payload.row_values ?? payload.row,
+    );
+    if (Object.keys(rowRecord).length > 0 && !Array.isArray(payload.row_data)) {
+      const headerRead = asRecord(
+        await handlers["sheets.readRange"]({
+          ...payload,
+          range: `${sheetName}!1:1`,
+        }),
+      );
+      const headerRows = parseBodyAsList(headerRead.values);
+      const headers =
+        headerRows.length > 0 && Array.isArray(headerRows[0])
+          ? (headerRows[0] as unknown[])
+          : [];
+
+      if (headers.length > 0) {
+        values = [
+          headers.map((header) => {
+            const key = String(header ?? "").trim();
+            return key ? (rowRecord[key] ?? "") : "";
+          }),
+        ];
+      }
+    }
+
+    const width = Math.max(1, values[0]?.length || 1);
+    const startColumn = Number(payload.column ?? payload.column_index ?? 1);
+    const startColName = toSheetColumnName(
+      Number.isFinite(startColumn) && startColumn > 0
+        ? Math.floor(startColumn)
+        : 1,
+    );
+    const endColName = toSheetColumnName(
+      (Number.isFinite(startColumn) && startColumn > 0
+        ? Math.floor(startColumn)
+        : 1) +
+        width -
+        1,
+    );
+
+    return handlers["sheets.updateCells"]({
+      ...payload,
+      range: `${sheetName}!${startColName}${Math.floor(rowIndexRaw)}:${endColName}${Math.floor(rowIndexRaw)}`,
+      values,
+    });
+  },
+
+  "sheets.deleteRow": async (params) => {
+    const payload = params as JsonRecord;
+    const config = await getSheetsConfig(payload);
+    const sheetName =
+      pickString(payload, ["sheet_name", "sheet", "tab"]) || "Sheet1";
+    const rowIndexRaw = Number(
+      payload.row_index ??
+        payload.row ??
+        payload.row_number ??
+        payload.rowNumber,
+    );
+
+    if (!Number.isFinite(rowIndexRaw) || rowIndexRaw <= 0) {
+      throw new Error(
+        "sheets.delete_row requires row_index (or row/row_number) greater than 0.",
+      );
+    }
+
+    const metadata = await sheetsApiRequest(config, "GET", "");
+    const sheets = parseBodyAsList(metadata.sheets);
+    const target = sheets
+      .map((entry) => parseBodyAsRecord(entry))
+      .find((entry) => {
+        const properties = parseBodyAsRecord(entry.properties);
+        return pickString(properties, ["title"]) === sheetName;
+      });
+
+    if (!target) {
+      throw new Error(`Sheet '${sheetName}' was not found in spreadsheet.`);
+    }
+
+    const properties = parseBodyAsRecord(target.properties);
+    const sheetId = Number(properties.sheetId ?? NaN);
+    if (!Number.isFinite(sheetId)) {
+      throw new Error(`Sheet '${sheetName}' is missing a valid sheetId.`);
+    }
+
+    const startIndex = Math.floor(rowIndexRaw) - 1;
+    const endIndex = startIndex + 1;
+
+    await sheetsApiRequest(
+      config,
+      "POST",
+      ":batchUpdate",
+      {
+        requests: [
+          {
+            deleteDimension: {
+              range: {
+                sheetId,
+                dimension: "ROWS",
+                startIndex,
+                endIndex,
+              },
+            },
+          },
+        ],
+      },
+      { writeOperation: true },
+    );
+
+    return {
+      sheet_id: config.spreadsheetId,
+      sheet_name: sheetName,
+      deleted_row_index: Math.floor(rowIndexRaw),
+      ok: true,
+    };
+  },
+
+  "sheets.queryRows": async (params) => {
+    const payload = params as JsonRecord;
+    const sheetName =
+      pickString(payload, ["sheet_name", "sheet", "tab"]) || "Sheet1";
+    const range = pickString(payload, ["range"]) || `${sheetName}!A1:ZZ1000`;
+    const queryText =
+      pickString(payload, ["query", "search", "contains"]) || "";
+    const column = pickString(payload, ["column", "field", "header"]);
+    const value = pickString(payload, ["value", "equals", "match"]);
+    const operator = (
+      pickString(payload, ["operator", "op"]) || "equals"
+    ).toLowerCase();
+    const filters = asRecord(payload.filters);
+    const limitRaw = Number(
+      payload.limit ?? payload.max_rows ?? payload.maxResults ?? 100,
+    );
+    const limit = Number.isFinite(limitRaw)
+      ? Math.max(1, Math.min(5000, Math.floor(limitRaw)))
+      : 100;
+
+    const readResult = asRecord(
+      await handlers["sheets.readRange"]({
+        ...payload,
+        range,
+      }),
+    );
+
+    const values = parseBodyAsList(readResult.values).map((entry) =>
+      Array.isArray(entry) ? entry : [entry],
+    );
+    const headerRow =
+      values.length > 0 && Array.isArray(values[0]) ? values[0] : [];
+    const headers = headerRow.map((header, index) => {
+      const text = String(header ?? "").trim();
+      return text || `column_${index + 1}`;
+    });
+
+    const dataRows = values.slice(1).map((row, rowOffset) => {
+      const rowRecord: JsonRecord = {
+        _rowIndex: rowOffset + 2,
+      };
+      headers.forEach((header, index) => {
+        rowRecord[header] = (row as unknown[])[index] ?? "";
+      });
+      return rowRecord;
+    });
+
+    const normalizedQuery = queryText.trim().toLowerCase();
+
+    const matched = dataRows.filter((row) => {
+      if (normalizedQuery) {
+        const haystack = Object.values(row)
+          .map((item) => String(item ?? ""))
+          .join(" ")
+          .toLowerCase();
+        if (!haystack.includes(normalizedQuery)) {
+          return false;
+        }
+      }
+
+      if (column && value !== undefined) {
+        const current = String(row[column] ?? "");
+        const expected = String(value);
+        const currentLower = current.toLowerCase();
+        const expectedLower = expected.toLowerCase();
+
+        if (operator === "contains" && !currentLower.includes(expectedLower)) {
+          return false;
+        }
+
+        if (
+          operator === "starts_with" &&
+          !currentLower.startsWith(expectedLower)
+        ) {
+          return false;
+        }
+
+        if (operator === "not_equals" && currentLower === expectedLower) {
+          return false;
+        }
+
+        if (
+          (operator === "equals" || operator === "eq") &&
+          currentLower !== expectedLower
+        ) {
+          return false;
+        }
+      }
+
+      for (const [filterKey, filterValue] of Object.entries(filters)) {
+        const rowValue = String(row[filterKey] ?? "").toLowerCase();
+        const expected = String(filterValue ?? "").toLowerCase();
+        if (rowValue !== expected) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+
+    return {
+      sheet_id: readResult.sheet_id,
+      range: readResult.range,
+      headers,
+      rows: matched.slice(0, limit),
+      count: matched.length,
+      returned: Math.min(matched.length, limit),
     };
   },
 
@@ -3860,7 +4359,11 @@ const handlers: Record<string, MCPHandler> = {
     const payload = params as JsonRecord;
 
     let message: JsonRecord;
-    if (typeof payload.message === "object" && payload.message && !Array.isArray(payload.message)) {
+    if (
+      typeof payload.message === "object" &&
+      payload.message &&
+      !Array.isArray(payload.message)
+    ) {
       message = parseBodyAsRecord(payload.message);
     } else {
       const messageId = pickString(payload, ["messageId", "id", "emailId"]);
@@ -4044,10 +4547,16 @@ const handlers: Record<string, MCPHandler> = {
     }
 
     const addLabelIds = parseBodyAsList(payload.addLabelIds ?? payload.labels)
-      .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+      .filter(
+        (entry): entry is string =>
+          typeof entry === "string" && entry.trim().length > 0,
+      )
       .map((entry) => entry.trim());
     const removeLabelIds = parseBodyAsList(payload.removeLabelIds)
-      .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+      .filter(
+        (entry): entry is string =>
+          typeof entry === "string" && entry.trim().length > 0,
+      )
       .map((entry) => entry.trim());
 
     if (addLabelIds.length === 0 && removeLabelIds.length === 0) {
@@ -4159,7 +4668,9 @@ const handlers: Record<string, MCPHandler> = {
       const idMatch = wantedAttachmentId
         ? entry.attachmentId === wantedAttachmentId
         : true;
-      const nameMatch = wantedFilename ? entry.filename === wantedFilename : true;
+      const nameMatch = wantedFilename
+        ? entry.filename === wantedFilename
+        : true;
       return idMatch && nameMatch;
     });
 
@@ -4188,7 +4699,9 @@ const handlers: Record<string, MCPHandler> = {
   "gmail.listenEmailEvents": async (params) => {
     const payload = params as JsonRecord;
     const config = await getGmailConfig(payload);
-    const maxResultsRaw = Number(payload.maxResults ?? payload.max_results ?? 20);
+    const maxResultsRaw = Number(
+      payload.maxResults ?? payload.max_results ?? 20,
+    );
     const maxResults = Number.isFinite(maxResultsRaw)
       ? Math.max(1, Math.min(100, maxResultsRaw))
       : 20;
@@ -4206,8 +4719,7 @@ const handlers: Record<string, MCPHandler> = {
         listening: true,
         mode: "poll_history",
         startHistoryId: pickString(profile, ["historyId"]),
-        hint:
-          "Call gmail.listen_email_events again with startHistoryId to fetch mailbox changes.",
+        hint: "Call gmail.listen_email_events again with startHistoryId to fetch mailbox changes.",
       };
     }
 
@@ -4219,20 +4731,26 @@ const handlers: Record<string, MCPHandler> = {
 
     let response: JsonRecord;
     try {
-      response = await gmailApiRequest(config, "GET", `/history?${query.toString()}`);
+      response = await gmailApiRequest(
+        config,
+        "GET",
+        `/history?${query.toString()}`,
+      );
     } catch (error) {
       throw withGmailPermissionGuidance(error, "listen_email_events");
     }
 
     const history = parseBodyAsList(response.history).map((entry) => {
       const record = parseBodyAsRecord(entry);
-      const messagesAdded = parseBodyAsList(record.messagesAdded).map((added) => {
-        const message = parseBodyAsRecord(parseBodyAsRecord(added).message);
-        return {
-          id: pickString(message, ["id"]),
-          threadId: pickString(message, ["threadId"]),
-        };
-      });
+      const messagesAdded = parseBodyAsList(record.messagesAdded).map(
+        (added) => {
+          const message = parseBodyAsRecord(parseBodyAsRecord(added).message);
+          return {
+            id: pickString(message, ["id"]),
+            threadId: pickString(message, ["threadId"]),
+          };
+        },
+      );
 
       return {
         id: pickString(record, ["id"]),
@@ -5170,14 +5688,26 @@ export async function executeNode(
     google_sheets: {
       "read-sheet": "sheets.readRange",
       "read-range": "sheets.readRange",
+      "get-rows": "sheets.getRows",
       "append-row": "sheets.appendRow",
+      "add-row": "sheets.addRow",
       "update-cells": "sheets.updateCells",
+      "update-row": "sheets.updateRow",
+      "delete-row": "sheets.deleteRow",
+      "query-rows": "sheets.queryRows",
+      "list-sheets": "sheets.listSheets",
     },
     sheets: {
       "read-sheet": "sheets.readRange",
       "read-range": "sheets.readRange",
+      "get-rows": "sheets.getRows",
       "append-row": "sheets.appendRow",
+      "add-row": "sheets.addRow",
       "update-cells": "sheets.updateCells",
+      "update-row": "sheets.updateRow",
+      "delete-row": "sheets.deleteRow",
+      "query-rows": "sheets.queryRows",
+      "list-sheets": "sheets.listSheets",
     },
     gmail: {
       "list-messages": "gmail.listMessages",
@@ -5395,12 +5925,36 @@ export function getAvailableMethods(): {
       description: "Read values from Google Sheets range",
     },
     {
+      method: "sheets.getRows",
+      description: "Get structured rows from Google Sheets",
+    },
+    {
       method: "sheets.appendRow",
       description: "Append row(s) to Google Sheets",
     },
     {
+      method: "sheets.addRow",
+      description: "Add a row to Google Sheets",
+    },
+    {
       method: "sheets.updateCells",
       description: "Update Google Sheets cells",
+    },
+    {
+      method: "sheets.updateRow",
+      description: "Update a specific Google Sheets row",
+    },
+    {
+      method: "sheets.deleteRow",
+      description: "Delete a row from Google Sheets",
+    },
+    {
+      method: "sheets.queryRows",
+      description: "Query/filter rows from Google Sheets",
+    },
+    {
+      method: "sheets.listSheets",
+      description: "List tabs in a Google spreadsheet",
     },
     {
       method: "gmail.listMessages",

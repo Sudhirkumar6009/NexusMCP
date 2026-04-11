@@ -229,6 +229,11 @@ const TOOL_INPUT_FALLBACKS: Record<string, Record<string, string>> = {
     sheet_id: "string",
     range: "string",
   },
+  "google_sheets.get_rows": {
+    sheet_id: "string",
+    sheet_name: "string",
+    range: "string",
+  },
   "google_sheets.append_rows": {
     sheet_id: "string",
     sheet_name: "string",
@@ -239,10 +244,34 @@ const TOOL_INPUT_FALLBACKS: Record<string, Record<string, string>> = {
     sheet_name: "string",
     row_data: "array",
   },
+  "google_sheets.add_row": {
+    sheet_id: "string",
+    sheet_name: "string",
+    row_data: "array",
+  },
   "google_sheets.update_cells": {
     sheet_id: "string",
     range: "string",
     values: "array",
+  },
+  "google_sheets.update_row": {
+    sheet_id: "string",
+    row_index: "number",
+    values: "array",
+  },
+  "google_sheets.delete_row": {
+    sheet_id: "string",
+    row_index: "number",
+  },
+  "google_sheets.query_rows": {
+    sheet_id: "string",
+    sheet_name: "string",
+    query: "string",
+    column: "string",
+    value: "string",
+  },
+  "google_sheets.list_sheets": {
+    sheet_id: "string",
   },
   "sheets.read_range": {
     sheet_id: "string",
@@ -252,7 +281,17 @@ const TOOL_INPUT_FALLBACKS: Record<string, Record<string, string>> = {
     sheet_id: "string",
     range: "string",
   },
+  "sheets.get_rows": {
+    sheet_id: "string",
+    sheet_name: "string",
+    range: "string",
+  },
   "sheets.append_row": {
+    sheet_id: "string",
+    sheet_name: "string",
+    row_data: "array",
+  },
+  "sheets.add_row": {
     sheet_id: "string",
     sheet_name: "string",
     row_data: "array",
@@ -261,6 +300,24 @@ const TOOL_INPUT_FALLBACKS: Record<string, Record<string, string>> = {
     sheet_id: "string",
     range: "string",
     values: "array",
+  },
+  "sheets.update_row": {
+    sheet_id: "string",
+    row_index: "number",
+    values: "array",
+  },
+  "sheets.delete_row": {
+    sheet_id: "string",
+    row_index: "number",
+  },
+  "sheets.query_rows": {
+    sheet_id: "string",
+    query: "string",
+    column: "string",
+    value: "string",
+  },
+  "sheets.list_sheets": {
+    sheet_id: "string",
   },
   "gmail.list_messages": {
     query: "string",
@@ -404,20 +461,61 @@ function getToolNameVariants(serviceId: ServiceId, toolName: string): string[] {
     if (normalizedToolName.endsWith(".read_sheet")) {
       addVariants(
         "google_sheets.read_rows",
+        "google_sheets.get_rows",
         "sheets.read_range",
         "sheets_read_range",
         "sheets.read_sheet",
+        "sheets.get_rows",
+      );
+    }
+    if (normalizedToolName.endsWith(".get_rows")) {
+      addVariants(
+        "google_sheets.read_sheet",
+        "google_sheets.read_rows",
+        "sheets.read_range",
+        "sheets.get_rows",
       );
     }
     if (normalizedToolName.endsWith(".append_rows")) {
       addVariants(
         "google_sheets.append_row",
+        "google_sheets.add_row",
         "sheets.append_row",
+        "sheets.add_row",
         "sheets_append_row",
       );
     }
+    if (normalizedToolName.endsWith(".add_row")) {
+      addVariants(
+        "google_sheets.append_row",
+        "google_sheets.append_rows",
+        "sheets.append_row",
+        "sheets.add_row",
+      );
+    }
     if (normalizedToolName.endsWith(".update_cells")) {
-      addVariants("sheets.update_cells", "sheets_update_cells");
+      addVariants(
+        "google_sheets.update_row",
+        "sheets.update_cells",
+        "sheets_update_cells",
+        "sheets.update_row",
+      );
+    }
+    if (normalizedToolName.endsWith(".update_row")) {
+      addVariants(
+        "google_sheets.update_cells",
+        "sheets.update_row",
+        "sheets.update_cells",
+      );
+    }
+    if (normalizedToolName.endsWith(".delete_row")) {
+      addVariants("sheets.delete_row");
+    }
+    if (normalizedToolName.endsWith(".query_rows")) {
+      addVariants("sheets.query_rows");
+    }
+    if (normalizedToolName.endsWith(".list_sheets")) {
+      addVariants("sheets.list_sheets");
     }
   }
 
@@ -1026,7 +1124,7 @@ export function AgenticFlowRunner() {
         isOpen={showNoProviderModal}
         onClose={() => setShowNoProviderModal(false)}
         title="No Workflow Providers Detected"
-        description="No workflow was created because the prompt does not mention any supported providers. Please reference services such as Jira, Slack, GitHub, Google Sheets, Gmail, or AWS."
+        description="No workflow was created because the prompt does not mention any supported providers. Please reference services such as Jira, Slack, GitHub, Google Sheets, or Gmail."
         size="sm"
       >
         <ModalFooter>

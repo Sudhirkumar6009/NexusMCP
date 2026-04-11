@@ -23,7 +23,6 @@ const CONNECTOR_KEYWORDS: Record<ServiceId, string[]> = {
   github: ["github", "pull request", "pr", "repository", "branch"],
   google_sheets: ["sheet", "sheets", "spreadsheet", "rows", "cells"],
   gmail: ["gmail", "email", "mail", "inbox"],
-  aws: ["aws", "cloud", "lambda", "stack", "infrastructure"],
 };
 
 const ALL_CONNECTORS_REGEX =
@@ -41,7 +40,6 @@ const CONNECTOR_ALIASES: Record<ServiceId, string[]> = {
   github: ["github"],
   google_sheets: ["google sheets", "google_sheets", "sheets"],
   gmail: ["gmail", "google mail"],
-  aws: ["aws", "amazon web services"],
 };
 
 type FlowGraph = {
@@ -68,7 +66,6 @@ const SERVICE_IDS: ServiceId[] = [
   "github",
   "google_sheets",
   "gmail",
-  "aws",
 ];
 
 const SERVICE_TOKEN_TO_ID: Record<string, ServiceId> = {
@@ -83,7 +80,6 @@ const SERVICE_TOKEN_TO_ID: Record<string, ServiceId> = {
   google_mail: "gmail",
   googlemail: "gmail",
   mail: "gmail",
-  aws: "aws",
 };
 
 function normalizeServiceToken(value: string): string {

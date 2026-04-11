@@ -1,11 +1,11 @@
 import { v4 as uuidv4 } from "uuid";
 import type {
-  Workflow,
-  Integration,
   AuditLog,
-  User,
-  Settings,
+  Integration,
   Session,
+  Settings,
+  User,
+  Workflow,
   WorkflowExecution,
 } from "../types/index.js";
 import {
@@ -15,15 +15,14 @@ import {
   saveWorkflowExecution,
 } from "../services/postgres-store.js";
 
-// In-memory data store (simulating a database)
 class DataStore {
   private workflows: Map<string, Workflow> = new Map();
+  private executions: Map<string, WorkflowExecution> = new Map();
   private integrations: Map<string, Integration> = new Map();
   private logs: AuditLog[] = [];
   private users: Map<string, User> = new Map();
   private sessions: Map<string, Session> = new Map();
   private settings: Settings;
-  private executions: Map<string, WorkflowExecution> = new Map();
 
   constructor() {
     this.settings = this.getDefaultSettings();
@@ -202,20 +201,68 @@ class DataStore {
         status: "disconnected",
         capabilities: [
           {
-            id: "sheets-read",
-            name: "Read Sheet",
-            type: "query",
-            description: "Read values from a spreadsheet",
-            inputSchema: { spreadsheetId: "string", range: "string" },
-            outputSchema: { values: "array" },
+            id: "sheets-add-row",
+            name: "Add Row",
+            type: "action",
+            description: "Add a new row to a spreadsheet",
+            inputSchema: {
+              spreadsheetId: "string",
+              sheetName: "string",
+              rowData: "array",
+            },
+            outputSchema: { updatedRange: "string", updatedRows: "number" },
           },
           {
-            id: "sheets-append",
-            name: "Append Row",
+            id: "sheets-get-rows",
+            name: "Get Rows",
+            type: "query",
+            description: "Get rows from a spreadsheet",
+            inputSchema: { spreadsheetId: "string", range: "string" },
+            outputSchema: {
+              headers: "array",
+              rows: "array",
+              rowCount: "number",
+            },
+          },
+          {
+            id: "sheets-update-row",
+            name: "Update Row",
             type: "action",
-            description: "Append a row to a spreadsheet",
-            inputSchema: { spreadsheetId: "string", values: "array" },
-            outputSchema: { updatedRange: "string" },
+            description: "Update a row in a spreadsheet",
+            inputSchema: {
+              spreadsheetId: "string",
+              rowIndex: "number",
+              values: "array",
+            },
+            outputSchema: { updatedRange: "string", updatedCells: "number" },
+          },
+          {
+            id: "sheets-delete-row",
+            name: "Delete Row",
+            type: "action",
+            description: "Delete a row from a spreadsheet",
+            inputSchema: { spreadsheetId: "string", rowIndex: "number" },
+            outputSchema: { ok: "boolean", deletedRowIndex: "number" },
+          },
+          {
+            id: "sheets-query-rows",
+            name: "Query Rows",
+            type: "query",
+            description: "Filter rows based on query conditions",
+            inputSchema: {
+              spreadsheetId: "string",
+              query: "string",
+              filters: "object",
+            },
+            outputSchema: { rows: "array", count: "number" },
+          },
+          {
+            id: "sheets-list-sheets",
+            name: "List Sheets",
+            type: "query",
+            description: "List tabs available in a spreadsheet",
+            inputSchema: { spreadsheetId: "string" },
+            outputSchema: { sheets: "array", count: "number" },
           },
         ],
       },
@@ -241,31 +288,6 @@ class DataStore {
             description: "List mailbox messages",
             inputSchema: { query: "string" },
             outputSchema: { messages: "array" },
-          },
-        ],
-      },
-      {
-        id: "int-aws",
-        service: "aws",
-        name: "AWS",
-        description: "Cloud infrastructure and serverless operations",
-        status: "disconnected",
-        capabilities: [
-          {
-            id: "aws-invoke-lambda",
-            name: "Invoke Lambda",
-            type: "action",
-            description: "Invoke an AWS Lambda function",
-            inputSchema: { functionName: "string", payload: "object" },
-            outputSchema: { statusCode: "number" },
-          },
-          {
-            id: "aws-list-buckets",
-            name: "List S3 Buckets",
-            type: "query",
-            description: "List S3 buckets",
-            inputSchema: {},
-            outputSchema: { buckets: "array" },
           },
         ],
       },
@@ -492,10 +514,7 @@ class DataStore {
     void saveServiceConnection({
       connectionId: id,
       serviceName: updated.service,
-      apiKey:
-        credentials?.apiKey ||
-        credentials?.accessKeyId ||
-        credentials?.username,
+      apiKey: credentials?.apiKey || credentials?.username,
       token:
         credentials?.accessToken ||
         credentials?.refreshToken ||
