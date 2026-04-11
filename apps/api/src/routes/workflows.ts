@@ -1,6 +1,14 @@
 import { Router } from "express";
 import { dataStore } from "../data/store.js";
 import type { Workflow } from "../types/index.js";
+import {
+  deleteWorkflowDefinition,
+  getEventLogs,
+  getWorkflowDefinition,
+  isPostgresReady,
+  listWorkflowDefinitions,
+  saveWorkflowDefinition,
+} from "../services/postgres-store.js";
 
 const router = Router();
 
@@ -124,8 +132,16 @@ function sanitizeAgenticTools(
 }
 
 // GET /api/workflows - List all workflows
-router.get("/", (_req, res) => {
-  const workflows = dataStore.getWorkflows();
+router.get("/", async (_req, res) => {
+  let workflows = dataStore.getWorkflows();
+
+  if (isPostgresReady()) {
+    const postgresWorkflows = await listWorkflowDefinitions();
+    if (postgresWorkflows.length > 0) {
+      workflows = postgresWorkflows;
+    }
+  }
+
   res.json({
     success: true,
     data: workflows,
@@ -133,8 +149,15 @@ router.get("/", (_req, res) => {
 });
 
 // GET /api/workflows/:id - Get a single workflow
-router.get("/:id", (req, res) => {
-  const workflow = dataStore.getWorkflow(req.params.id);
+router.get("/:id", async (req, res) => {
+  let workflow = dataStore.getWorkflow(req.params.id);
+
+  if (isPostgresReady()) {
+    const postgresWorkflow = await getWorkflowDefinition(req.params.id);
+    if (postgresWorkflow) {
+      workflow = postgresWorkflow;
+    }
+  }
 
   if (!workflow) {
     return res.status(404).json({
@@ -149,8 +172,116 @@ router.get("/:id", (req, res) => {
   });
 });
 
+// GET /api/workflows/:id/audits - Get workflow-specific audits/logs
+router.get("/:id/audits", async (req, res) => {
+  const limitRaw = Number(req.query.limit);
+  const limit = Number.isFinite(limitRaw)
+    ? Math.min(Math.max(limitRaw, 1), 200)
+    : 50;
+
+  const offsetRaw = Number(req.query.offset);
+  const offset = Number.isFinite(offsetRaw) ? Math.max(offsetRaw, 0) : 0;
+
+  const results = isPostgresReady()
+    ? await getEventLogs({
+        workflowId: req.params.id,
+        limit,
+        offset,
+      })
+    : dataStore.getLogs({
+        limit,
+        offset,
+      });
+
+  const filteredLogs = isPostgresReady()
+    ? results.logs
+    : results.logs.filter((log) => log.workflowId === req.params.id);
+
+  const executionStats = new Map<
+    string,
+    {
+      startedAt: string;
+      endedAt: string;
+      totalLogs: number;
+      errorCount: number;
+    }
+  >();
+
+  const byTimeAsc = [...filteredLogs].sort(
+    (a, b) =>
+      new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+  );
+
+  for (const log of byTimeAsc) {
+    if (!log.executionId) {
+      continue;
+    }
+
+    const current = executionStats.get(log.executionId);
+    if (!current) {
+      executionStats.set(log.executionId, {
+        startedAt: log.timestamp,
+        endedAt: log.timestamp,
+        totalLogs: 1,
+        errorCount: log.level === "error" ? 1 : 0,
+      });
+      continue;
+    }
+
+    current.endedAt = log.timestamp;
+    current.totalLogs += 1;
+    if (log.level === "error") {
+      current.errorCount += 1;
+    }
+  }
+
+  const runNumberByExecutionId = new Map<string, number>();
+  const orderedRuns = [...executionStats.entries()].sort(
+    (a, b) =>
+      new Date(a[1].startedAt).getTime() - new Date(b[1].startedAt).getTime(),
+  );
+
+  const runs = orderedRuns
+    .map(([executionId, meta], index) => {
+      const runNumber = index + 1;
+      runNumberByExecutionId.set(executionId, runNumber);
+
+      return {
+        runNumber,
+        executionId,
+        startedAt: meta.startedAt,
+        endedAt: meta.endedAt,
+        totalLogs: meta.totalLogs,
+        errorCount: meta.errorCount,
+      };
+    })
+    .sort((a, b) => b.runNumber - a.runNumber);
+
+  const enrichedLogs = filteredLogs.map((log) => ({
+    ...log,
+    runNumber: log.executionId
+      ? runNumberByExecutionId.get(log.executionId)
+      : undefined,
+  }));
+
+  res.json({
+    success: true,
+    data: {
+      logs: enrichedLogs,
+      runs,
+    },
+    pagination: {
+      total: isPostgresReady()
+        ? results.total
+        : enrichedLogs.length,
+      limit,
+      offset,
+    },
+  });
+});
+
 // POST /api/workflows - Create a new workflow
-router.post("/", (req, res) => {
+router.post("/", async (req, res) => {
   const { name, description, nodes, edges, status } = req.body;
 
   if (!name) {
@@ -168,6 +299,10 @@ router.post("/", (req, res) => {
     status: status || "draft",
   });
 
+  if (isPostgresReady()) {
+    await saveWorkflowDefinition(workflow);
+  }
+
   res.status(201).json({
     success: true,
     data: workflow,
@@ -176,15 +311,34 @@ router.post("/", (req, res) => {
 });
 
 // PUT /api/workflows/:id - Update a workflow
-router.put("/:id", (req, res) => {
+router.put("/:id", async (req, res) => {
   const updates: Partial<Workflow> = req.body;
-  const workflow = dataStore.updateWorkflow(req.params.id, updates);
+  const workflowId = req.params.id;
+
+  let workflow = dataStore.updateWorkflow(workflowId, updates);
+
+  if (!workflow && isPostgresReady()) {
+    const existing = await getWorkflowDefinition(workflowId);
+    if (existing) {
+      workflow = {
+        ...existing,
+        ...updates,
+        id: existing.id,
+        createdAt: existing.createdAt,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+  }
 
   if (!workflow) {
     return res.status(404).json({
       success: false,
       error: "Workflow not found",
     });
+  }
+
+  if (isPostgresReady()) {
+    await saveWorkflowDefinition(workflow);
   }
 
   res.json({
@@ -195,10 +349,14 @@ router.put("/:id", (req, res) => {
 });
 
 // DELETE /api/workflows/:id - Delete a workflow
-router.delete("/:id", (req, res) => {
-  const deleted = dataStore.deleteWorkflow(req.params.id);
+router.delete("/:id", async (req, res) => {
+  const workflowId = req.params.id;
+  const deletedInMemory = dataStore.deleteWorkflow(workflowId);
+  const deletedInPostgres = isPostgresReady()
+    ? await deleteWorkflowDefinition(workflowId)
+    : false;
 
-  if (!deleted) {
+  if (!deletedInMemory && !deletedInPostgres) {
     return res.status(404).json({
       success: false,
       error: "Workflow not found",
@@ -230,8 +388,11 @@ router.post("/:id/execute", (req, res) => {
 });
 
 // POST /api/workflows/:id/pause - Pause a running workflow
-router.post("/:id/pause", (req, res) => {
-  const workflow = dataStore.getWorkflow(req.params.id);
+router.post("/:id/pause", async (req, res) => {
+  const workflowId = req.params.id;
+  const workflow = isPostgresReady()
+    ? await getWorkflowDefinition(workflowId)
+    : dataStore.getWorkflow(workflowId);
 
   if (!workflow) {
     return res.status(404).json({
@@ -247,7 +408,17 @@ router.post("/:id/pause", (req, res) => {
     });
   }
 
-  const updated = dataStore.updateWorkflow(req.params.id, { status: "paused" });
+  const updated = {
+    ...workflow,
+    status: "paused" as Workflow["status"],
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (isPostgresReady()) {
+    await saveWorkflowDefinition(updated);
+  } else {
+    dataStore.updateWorkflow(workflowId, { status: "paused" });
+  }
 
   dataStore.addLog({
     level: "info",
@@ -265,8 +436,11 @@ router.post("/:id/pause", (req, res) => {
 });
 
 // POST /api/workflows/:id/resume - Resume a paused workflow
-router.post("/:id/resume", (req, res) => {
-  const workflow = dataStore.getWorkflow(req.params.id);
+router.post("/:id/resume", async (req, res) => {
+  const workflowId = req.params.id;
+  const workflow = isPostgresReady()
+    ? await getWorkflowDefinition(workflowId)
+    : dataStore.getWorkflow(workflowId);
 
   if (!workflow) {
     return res.status(404).json({
@@ -282,9 +456,17 @@ router.post("/:id/resume", (req, res) => {
     });
   }
 
-  const updated = dataStore.updateWorkflow(req.params.id, {
-    status: "running",
-  });
+  const updated = {
+    ...workflow,
+    status: "running" as Workflow["status"],
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (isPostgresReady()) {
+    await saveWorkflowDefinition(updated);
+  } else {
+    dataStore.updateWorkflow(workflowId, { status: "running" });
+  }
 
   dataStore.addLog({
     level: "info",
@@ -302,8 +484,11 @@ router.post("/:id/resume", (req, res) => {
 });
 
 // POST /api/workflows/:id/stop - Stop a workflow
-router.post("/:id/stop", (req, res) => {
-  const workflow = dataStore.getWorkflow(req.params.id);
+router.post("/:id/stop", async (req, res) => {
+  const workflowId = req.params.id;
+  const workflow = isPostgresReady()
+    ? await getWorkflowDefinition(workflowId)
+    : dataStore.getWorkflow(workflowId);
 
   if (!workflow) {
     return res.status(404).json({
@@ -319,7 +504,17 @@ router.post("/:id/stop", (req, res) => {
     });
   }
 
-  const updated = dataStore.updateWorkflow(req.params.id, { status: "ready" });
+  const updated = {
+    ...workflow,
+    status: "ready" as Workflow["status"],
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (isPostgresReady()) {
+    await saveWorkflowDefinition(updated);
+  } else {
+    dataStore.updateWorkflow(workflowId, { status: "ready" });
+  }
 
   dataStore.addLog({
     level: "info",
@@ -495,6 +690,10 @@ router.post("/generate", async (req, res) => {
     edges,
     status: "draft",
   });
+
+  if (isPostgresReady()) {
+    await saveWorkflowDefinition(workflow);
+  }
 
   res.json({
     success: true,

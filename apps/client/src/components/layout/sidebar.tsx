@@ -10,6 +10,7 @@ import {
   ScrollText,
   Settings,
   User,
+  Workflow,
   Zap,
 } from 'lucide-react';
 
@@ -21,6 +22,7 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+  { label: 'Workflows', href: '/workflows', icon: Workflow },
   { label: 'Integrations', href: '/integrations', icon: Plug },
   { label: 'Audit Logs', href: '/logs', icon: ScrollText },
   { label: 'Settings', href: '/settings', icon: Settings },
