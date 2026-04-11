@@ -19,6 +19,202 @@ const AGENTIC_SERVICE_TIMEOUT_MS = Number(
   process.env.AGENTIC_SERVICE_TIMEOUT_MS ?? "60000",
 );
 
+type AuthenticatedRequest = {
+  userId?: string;
+};
+
+type WorkflowNodeType = Workflow["nodes"][number]["type"];
+type WorkflowNodeService = Workflow["nodes"][number]["service"];
+
+function getRequestUserId(req: unknown): string | undefined {
+  const request = req as AuthenticatedRequest;
+  return typeof request.userId === "string" ? request.userId : undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  return value as Record<string, unknown>;
+}
+
+function normalizeNodeService(value?: string): WorkflowNodeService {
+  const normalized = (value || "").trim().toLowerCase().replace(/-/g, "_");
+
+  if (normalized === "jira") return "jira";
+  if (normalized === "slack") return "slack";
+  if (normalized === "github") return "github";
+  if (normalized === "gmail") return "gmail";
+  if (normalized === "google_sheets" || normalized === "sheets") {
+    return "google_sheets";
+  }
+  if (normalized === "postgres" || normalized === "postgresql") {
+    return "postgres";
+  }
+
+  return "postgres";
+}
+
+function toNodeType(phase?: string): WorkflowNodeType {
+  const normalized = (phase || "").trim().toLowerCase();
+
+  if (normalized === "start") return "trigger";
+  if (normalized === "required-api") return "condition";
+  if (normalized === "end") return "output";
+
+  return "action";
+}
+
+function toNodeStatus(
+  statusRaw: unknown,
+): Workflow["nodes"][number]["status"] | undefined {
+  if (typeof statusRaw !== "string") {
+    return undefined;
+  }
+
+  const normalized = statusRaw.trim().toLowerCase();
+  if (normalized === "pending") return "pending";
+  if (normalized === "running") return "running";
+  if (normalized === "done" || normalized === "completed") {
+    return "completed";
+  }
+  if (normalized === "failed") return "failed";
+  if (normalized === "skipped") return "skipped";
+
+  return undefined;
+}
+
+function buildStoredWorkflowFromAgenticPayload(args: {
+  prompt: string;
+  payload: unknown;
+  ownerUserId?: string;
+}): Workflow | null {
+  const payloadRecord = asRecord(args.payload);
+  const rawSteps = Array.isArray(payloadRecord.steps)
+    ? payloadRecord.steps
+    : Array.isArray(payloadRecord.flowSteps)
+      ? payloadRecord.flowSteps
+      : [];
+
+  if (rawSteps.length === 0) {
+    return null;
+  }
+
+  const levelIndexMap = new Map<number, number>();
+  const nodes: Workflow["nodes"] = rawSteps.flatMap((entry, index) => {
+    const step = asRecord(entry);
+    const id =
+      typeof step.id === "string" && step.id.trim().length > 0
+        ? step.id.trim()
+        : `step-${index + 1}`;
+
+    const label =
+      typeof step.label === "string" && step.label.trim().length > 0
+        ? step.label.trim()
+        : id;
+
+    const levelRaw = Number(step.level);
+    const level = Number.isFinite(levelRaw) ? Math.max(0, levelRaw) : 0;
+    const levelCount = levelIndexMap.get(level) ?? 0;
+    levelIndexMap.set(level, levelCount + 1);
+
+    const serviceFromTool =
+      typeof step.tool === "string" && step.tool.includes(".")
+        ? step.tool.split(".")[0]
+        : undefined;
+
+    const operation =
+      typeof step.tool === "string" && step.tool.trim().length > 0
+        ? step.tool
+        : typeof step.phase === "string"
+          ? step.phase
+          : "process";
+
+    return [
+      {
+        id,
+        type: toNodeType(typeof step.phase === "string" ? step.phase : ""),
+        service: normalizeNodeService(
+          typeof step.serviceId === "string" ? step.serviceId : serviceFromTool,
+        ),
+        operation,
+        label,
+        config:
+          step.arguments && typeof step.arguments === "object"
+            ? (step.arguments as Record<string, unknown>)
+            : {
+                prompt: args.prompt,
+              },
+        position: {
+          x: 120 + level * 320,
+          y: 70 + levelCount * 136,
+        },
+        status: toNodeStatus(step.status),
+      },
+    ];
+  });
+
+  const rawEdges = Array.isArray(payloadRecord.edges)
+    ? payloadRecord.edges
+    : Array.isArray(payloadRecord.flowEdges)
+      ? payloadRecord.flowEdges
+      : [];
+
+  let edges: Workflow["edges"] = rawEdges.flatMap((entry, index) => {
+    const edge = asRecord(entry);
+    const source =
+      typeof edge.source === "string" && edge.source.trim().length > 0
+        ? edge.source.trim()
+        : "";
+    const target =
+      typeof edge.target === "string" && edge.target.trim().length > 0
+        ? edge.target.trim()
+        : "";
+
+    if (!source || !target) {
+      return [];
+    }
+
+    const id =
+      typeof edge.id === "string" && edge.id.trim().length > 0
+        ? edge.id.trim()
+        : `edge-${index + 1}`;
+
+    return [
+      {
+        id,
+        source,
+        target,
+      },
+    ];
+  });
+
+  if (edges.length === 0 && nodes.length > 1) {
+    edges = nodes.slice(1).map((node, index) => ({
+      id: `edge-auto-${index + 1}`,
+      source: nodes[index].id,
+      target: node.id,
+    }));
+  }
+
+  const workflow = dataStore.createWorkflow({
+    name: `Agentic Flow: ${args.prompt.slice(0, 64)}`,
+    description: args.prompt,
+    nodes,
+    edges,
+    status: "ready",
+    ownerUserId: args.ownerUserId,
+    generatedJson: {
+      source: "agentic-flow",
+      prompt: args.prompt,
+      plan: payloadRecord,
+    },
+  });
+
+  return workflow;
+}
+
 type AgenticIntegrationInput = {
   id: string;
   name: string;
@@ -131,16 +327,13 @@ function sanitizeAgenticTools(
   return sanitized;
 }
 
-// GET /api/workflows - List all workflows
-router.get("/", async (_req, res) => {
-  let workflows = dataStore.getWorkflows();
+// GET /api/workflows - List current user's workflows
+router.get("/", async (req, res) => {
+  const userId = getRequestUserId(req);
 
-  if (isPostgresReady()) {
-    const postgresWorkflows = await listWorkflowDefinitions();
-    if (postgresWorkflows.length > 0) {
-      workflows = postgresWorkflows;
-    }
-  }
+  const workflows = isPostgresReady()
+    ? await listWorkflowDefinitions(userId)
+    : dataStore.getWorkflows();
 
   res.json({
     success: true,
@@ -150,14 +343,11 @@ router.get("/", async (_req, res) => {
 
 // GET /api/workflows/:id - Get a single workflow
 router.get("/:id", async (req, res) => {
-  let workflow = dataStore.getWorkflow(req.params.id);
+  const userId = getRequestUserId(req);
 
-  if (isPostgresReady()) {
-    const postgresWorkflow = await getWorkflowDefinition(req.params.id);
-    if (postgresWorkflow) {
-      workflow = postgresWorkflow;
-    }
-  }
+  const workflow = isPostgresReady()
+    ? await getWorkflowDefinition(req.params.id, userId)
+    : dataStore.getWorkflow(req.params.id);
 
   if (!workflow) {
     return res.status(404).json({
@@ -208,8 +398,7 @@ router.get("/:id/audits", async (req, res) => {
   >();
 
   const byTimeAsc = [...filteredLogs].sort(
-    (a, b) =>
-      new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
   );
 
   for (const log of byTimeAsc) {
@@ -271,9 +460,7 @@ router.get("/:id/audits", async (req, res) => {
       runs,
     },
     pagination: {
-      total: isPostgresReady()
-        ? results.total
-        : enrichedLogs.length,
+      total: isPostgresReady() ? results.total : enrichedLogs.length,
       limit,
       offset,
     },
@@ -283,6 +470,11 @@ router.get("/:id/audits", async (req, res) => {
 // POST /api/workflows - Create a new workflow
 router.post("/", async (req, res) => {
   const { name, description, nodes, edges, status } = req.body;
+  const generatedJson =
+    req.body?.generatedJson && typeof req.body.generatedJson === "object"
+      ? (req.body.generatedJson as Record<string, unknown>)
+      : undefined;
+  const userId = getRequestUserId(req);
 
   if (!name) {
     return res.status(400).json({
@@ -297,10 +489,16 @@ router.post("/", async (req, res) => {
     nodes: nodes || [],
     edges: edges || [],
     status: status || "draft",
+    generatedJson,
+    ownerUserId: userId,
   });
 
   if (isPostgresReady()) {
-    await saveWorkflowDefinition(workflow);
+    await saveWorkflowDefinition({
+      ...workflow,
+      ownerUserId: userId,
+      generatedJson,
+    });
   }
 
   res.status(201).json({
@@ -314,11 +512,12 @@ router.post("/", async (req, res) => {
 router.put("/:id", async (req, res) => {
   const updates: Partial<Workflow> = req.body;
   const workflowId = req.params.id;
+  const userId = getRequestUserId(req);
 
   let workflow = dataStore.updateWorkflow(workflowId, updates);
 
   if (!workflow && isPostgresReady()) {
-    const existing = await getWorkflowDefinition(workflowId);
+    const existing = await getWorkflowDefinition(workflowId, userId);
     if (existing) {
       workflow = {
         ...existing,
@@ -338,7 +537,11 @@ router.put("/:id", async (req, res) => {
   }
 
   if (isPostgresReady()) {
-    await saveWorkflowDefinition(workflow);
+    await saveWorkflowDefinition({
+      ...workflow,
+      ownerUserId: workflow.ownerUserId || userId,
+      generatedJson: workflow.generatedJson,
+    });
   }
 
   res.json({
@@ -351,9 +554,10 @@ router.put("/:id", async (req, res) => {
 // DELETE /api/workflows/:id - Delete a workflow
 router.delete("/:id", async (req, res) => {
   const workflowId = req.params.id;
+  const userId = getRequestUserId(req);
   const deletedInMemory = dataStore.deleteWorkflow(workflowId);
   const deletedInPostgres = isPostgresReady()
-    ? await deleteWorkflowDefinition(workflowId)
+    ? await deleteWorkflowDefinition(workflowId, userId)
     : false;
 
   if (!deletedInMemory && !deletedInPostgres) {
@@ -390,8 +594,9 @@ router.post("/:id/execute", (req, res) => {
 // POST /api/workflows/:id/pause - Pause a running workflow
 router.post("/:id/pause", async (req, res) => {
   const workflowId = req.params.id;
+  const userId = getRequestUserId(req);
   const workflow = isPostgresReady()
-    ? await getWorkflowDefinition(workflowId)
+    ? await getWorkflowDefinition(workflowId, userId)
     : dataStore.getWorkflow(workflowId);
 
   if (!workflow) {
@@ -415,7 +620,11 @@ router.post("/:id/pause", async (req, res) => {
   };
 
   if (isPostgresReady()) {
-    await saveWorkflowDefinition(updated);
+    await saveWorkflowDefinition({
+      ...updated,
+      ownerUserId: updated.ownerUserId || userId,
+      generatedJson: updated.generatedJson,
+    });
   } else {
     dataStore.updateWorkflow(workflowId, { status: "paused" });
   }
@@ -438,8 +647,9 @@ router.post("/:id/pause", async (req, res) => {
 // POST /api/workflows/:id/resume - Resume a paused workflow
 router.post("/:id/resume", async (req, res) => {
   const workflowId = req.params.id;
+  const userId = getRequestUserId(req);
   const workflow = isPostgresReady()
-    ? await getWorkflowDefinition(workflowId)
+    ? await getWorkflowDefinition(workflowId, userId)
     : dataStore.getWorkflow(workflowId);
 
   if (!workflow) {
@@ -463,7 +673,11 @@ router.post("/:id/resume", async (req, res) => {
   };
 
   if (isPostgresReady()) {
-    await saveWorkflowDefinition(updated);
+    await saveWorkflowDefinition({
+      ...updated,
+      ownerUserId: updated.ownerUserId || userId,
+      generatedJson: updated.generatedJson,
+    });
   } else {
     dataStore.updateWorkflow(workflowId, { status: "running" });
   }
@@ -486,8 +700,9 @@ router.post("/:id/resume", async (req, res) => {
 // POST /api/workflows/:id/stop - Stop a workflow
 router.post("/:id/stop", async (req, res) => {
   const workflowId = req.params.id;
+  const userId = getRequestUserId(req);
   const workflow = isPostgresReady()
-    ? await getWorkflowDefinition(workflowId)
+    ? await getWorkflowDefinition(workflowId, userId)
     : dataStore.getWorkflow(workflowId);
 
   if (!workflow) {
@@ -511,7 +726,11 @@ router.post("/:id/stop", async (req, res) => {
   };
 
   if (isPostgresReady()) {
-    await saveWorkflowDefinition(updated);
+    await saveWorkflowDefinition({
+      ...updated,
+      ownerUserId: updated.ownerUserId || userId,
+      generatedJson: updated.generatedJson,
+    });
   } else {
     dataStore.updateWorkflow(workflowId, { status: "ready" });
   }
@@ -534,6 +753,7 @@ router.post("/:id/stop", async (req, res) => {
 // POST /api/workflows/generate - Generate workflow from prompt (AI simulation)
 router.post("/generate", async (req, res) => {
   const { prompt } = req.body;
+  const userId = getRequestUserId(req);
 
   if (!prompt) {
     return res.status(400).json({
@@ -689,10 +909,21 @@ router.post("/generate", async (req, res) => {
     nodes: nodes as Workflow["nodes"],
     edges,
     status: "draft",
+    ownerUserId: userId,
+    generatedJson: {
+      source: "generate",
+      prompt,
+      nodes,
+      edges,
+    },
   });
 
   if (isPostgresReady()) {
-    await saveWorkflowDefinition(workflow);
+    await saveWorkflowDefinition({
+      ...workflow,
+      ownerUserId: userId,
+      generatedJson: workflow.generatedJson,
+    });
   }
 
   res.json({
@@ -706,6 +937,7 @@ router.post("/generate", async (req, res) => {
 router.post("/agentic-flow", async (req, res) => {
   const prompt =
     typeof req.body?.prompt === "string" ? req.body.prompt.trim() : "";
+  const userId = getRequestUserId(req);
 
   if (!prompt) {
     return res.status(400).json({
@@ -763,9 +995,47 @@ router.post("/agentic-flow", async (req, res) => {
       });
     }
 
+    const storedWorkflow = buildStoredWorkflowFromAgenticPayload({
+      prompt,
+      payload,
+      ownerUserId: userId,
+    });
+
+    if (storedWorkflow && isPostgresReady()) {
+      await saveWorkflowDefinition({
+        ...storedWorkflow,
+        ownerUserId: userId,
+        generatedJson: storedWorkflow.generatedJson,
+      });
+    }
+
+    if (storedWorkflow) {
+      dataStore.addLog({
+        level: "info",
+        service: "system",
+        action: "workflow_generated_agentic",
+        message: `Agentic workflow stored: ${storedWorkflow.name}`,
+        workflowId: storedWorkflow.id,
+        userId,
+        details: {
+          source: "agentic-flow",
+          prompt,
+        },
+      });
+    }
+
+    const responsePayload =
+      payload && typeof payload === "object" && !Array.isArray(payload)
+        ? {
+            ...(payload as Record<string, unknown>),
+            storedWorkflowId: storedWorkflow?.id,
+            storedAt: new Date().toISOString(),
+          }
+        : payload;
+
     res.json({
       success: true,
-      data: payload,
+      data: responsePayload,
     });
   } catch (error) {
     const isTimeout = error instanceof Error && error.name === "AbortError";

@@ -36,6 +36,7 @@ export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const { user, logout } = useAuth();
+  const [auditTotalCount, setAuditTotalCount] = React.useState<number>(0);
   const [auditErrorCount, setAuditErrorCount] = React.useState<number>(0);
 
   const displayName = user?.name?.trim() || "User";
@@ -65,6 +66,7 @@ export function Sidebar() {
         return;
       }
 
+      setAuditTotalCount(response.data.total ?? 0);
       setAuditErrorCount(response.data.byLevel.error ?? 0);
     };
 
@@ -114,9 +116,17 @@ export function Sidebar() {
                 <Icon className="h-5 w-5" />
                 {item.label}
               </div>
-              {item.href === "/logs" && auditErrorCount > 0 ? (
-                <span className="rounded-full bg-error/15 px-2 py-0.5 text-xs font-semibold text-error">
-                  {auditErrorCount}
+              {item.href === "/logs" ? (
+                <span
+                  className={cn(
+                    "rounded-full px-2 py-0.5 text-xs font-semibold",
+                    auditErrorCount > 0
+                      ? "bg-error/15 text-error"
+                      : "bg-info-light text-info",
+                  )}
+                  title={`PostgreSQL logs: ${auditTotalCount} total, ${auditErrorCount} errors`}
+                >
+                  {auditTotalCount > 99 ? "99+" : auditTotalCount}
                 </span>
               ) : null}
             </Link>

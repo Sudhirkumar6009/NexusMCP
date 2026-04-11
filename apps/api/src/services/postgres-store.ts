@@ -60,6 +60,7 @@ const schemaStatements = [
     );`,
   `ALTER TABLE workflow_definitions ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'draft';`,
   `ALTER TABLE workflow_definitions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`,
+  `ALTER TABLE workflow_definitions ADD COLUMN IF NOT EXISTS owner_user_id TEXT;`,
   `CREATE TABLE IF NOT EXISTS workflow_executions (
       execution_id TEXT PRIMARY KEY,
       workflow_id TEXT NOT NULL REFERENCES workflow_definitions(workflow_id) ON DELETE CASCADE,
@@ -127,6 +128,7 @@ const schemaStatements = [
   `CREATE INDEX IF NOT EXISTS idx_step_runs_execution_id ON step_runs(execution_id);`,
   `CREATE INDEX IF NOT EXISTS idx_step_runs_updated_at ON step_runs(updated_at DESC);`,
   `CREATE INDEX IF NOT EXISTS idx_workflow_executions_workflow_id ON workflow_executions(workflow_id);`,
+  `CREATE INDEX IF NOT EXISTS idx_workflow_definitions_owner_user_id ON workflow_definitions(owner_user_id, updated_at DESC);`,
 ];
 
 function normalizeStatus(status: string): string {
@@ -194,7 +196,10 @@ export async function saveWorkflowDefinition(
     | "status"
     | "createdAt"
     | "updatedAt"
-  >,
+  > & {
+    ownerUserId?: string;
+    generatedJson?: Record<string, unknown>;
+  },
 ): Promise<void> {
   if (!postgresReady) return;
 
@@ -202,17 +207,19 @@ export async function saveWorkflowDefinition(
     nodes: workflow.nodes,
     edges: workflow.edges,
     status: workflow.status,
+    generatedJson: workflow.generatedJson,
   };
 
   await query(
-    `INSERT INTO workflow_definitions (workflow_id, name, natural_language_input, generated_dag, status, updated_at, created_at)
-     VALUES ($1, $2, $3, $4::jsonb, $5, $6::timestamptz, $7::timestamptz)
+    `INSERT INTO workflow_definitions (workflow_id, name, natural_language_input, generated_dag, status, owner_user_id, updated_at, created_at)
+     VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::timestamptz, $8::timestamptz)
      ON CONFLICT (workflow_id)
      DO UPDATE SET
        name = EXCLUDED.name,
        natural_language_input = EXCLUDED.natural_language_input,
        generated_dag = EXCLUDED.generated_dag,
        status = EXCLUDED.status,
+       owner_user_id = COALESCE(EXCLUDED.owner_user_id, workflow_definitions.owner_user_id),
        updated_at = EXCLUDED.updated_at`,
     [
       workflow.id,
@@ -220,6 +227,7 @@ export async function saveWorkflowDefinition(
       workflow.description || "",
       JSON.stringify(dag),
       workflow.status,
+      workflow.ownerUserId || null,
       workflow.updatedAt,
       workflow.createdAt,
     ],
@@ -266,16 +274,34 @@ function parseWorkflowRow(row: Record<string, unknown>): Workflow {
       String(row.updated_at || row.created_at || new Date().toISOString()),
     ).toISOString(),
     executionHistory: [],
+    ownerUserId:
+      typeof row.owner_user_id === "string" ? row.owner_user_id : undefined,
+    generatedJson:
+      dagRaw.generatedJson && typeof dagRaw.generatedJson === "object"
+        ? (dagRaw.generatedJson as Record<string, unknown>)
+        : undefined,
   };
 }
 
-export async function listWorkflowDefinitions(): Promise<Workflow[]> {
+export async function listWorkflowDefinitions(
+  ownerUserId?: string,
+): Promise<Workflow[]> {
   if (!postgresReady) return [];
 
+  const params: unknown[] = [];
+  const whereClause = ownerUserId
+    ? (() => {
+        params.push(ownerUserId);
+        return `WHERE owner_user_id = $${params.length}`;
+      })()
+    : "";
+
   const result = await query(
-    `SELECT workflow_id, name, natural_language_input, generated_dag, status, updated_at, created_at
+    `SELECT workflow_id, name, natural_language_input, generated_dag, status, owner_user_id, updated_at, created_at
      FROM workflow_definitions
+     ${whereClause}
      ORDER BY updated_at DESC, created_at DESC`,
+    params,
   );
 
   return result.rows.map((row) =>
@@ -285,15 +311,25 @@ export async function listWorkflowDefinitions(): Promise<Workflow[]> {
 
 export async function getWorkflowDefinition(
   workflowId: string,
+  ownerUserId?: string,
 ): Promise<Workflow | null> {
   if (!postgresReady) return null;
 
+  const params: unknown[] = [workflowId];
+  const ownerClause = ownerUserId
+    ? (() => {
+        params.push(ownerUserId);
+        return ` AND owner_user_id = $${params.length}`;
+      })()
+    : "";
+
   const result = await query(
-    `SELECT workflow_id, name, natural_language_input, generated_dag, status, updated_at, created_at
+    `SELECT workflow_id, name, natural_language_input, generated_dag, status, owner_user_id, updated_at, created_at
      FROM workflow_definitions
      WHERE workflow_id = $1
+     ${ownerClause}
      LIMIT 1`,
-    [workflowId],
+    params,
   );
 
   if (result.rows.length === 0) {
@@ -305,12 +341,21 @@ export async function getWorkflowDefinition(
 
 export async function deleteWorkflowDefinition(
   workflowId: string,
+  ownerUserId?: string,
 ): Promise<boolean> {
   if (!postgresReady) return false;
 
+  const params: unknown[] = [workflowId];
+  const ownerClause = ownerUserId
+    ? (() => {
+        params.push(ownerUserId);
+        return ` AND owner_user_id = $${params.length}`;
+      })()
+    : "";
+
   const result = await query(
-    `DELETE FROM workflow_definitions WHERE workflow_id = $1`,
-    [workflowId],
+    `DELETE FROM workflow_definitions WHERE workflow_id = $1${ownerClause}`,
+    params,
   );
 
   return (result.rowCount ?? 0) > 0;

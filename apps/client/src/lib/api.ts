@@ -387,6 +387,8 @@ interface Workflow {
   createdAt: string;
   updatedAt: string;
   executionHistory: WorkflowExecution[];
+  ownerUserId?: string;
+  generatedJson?: Record<string, unknown>;
 }
 
 interface CreateWorkflowRequest {
@@ -395,6 +397,7 @@ interface CreateWorkflowRequest {
   nodes?: DAGNode[];
   edges?: DAGEdge[];
   status?: Workflow["status"];
+  generatedJson?: Record<string, unknown>;
 }
 
 interface WorkflowExecution {

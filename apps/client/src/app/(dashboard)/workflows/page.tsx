@@ -1,13 +1,13 @@
-'use client';
+"use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import ReactFlow, {
   Background,
   Controls,
   type Edge,
   type Node,
-} from 'reactflow';
-import 'reactflow/dist/style.css';
+} from "reactflow";
+import "reactflow/dist/style.css";
 import {
   AlertCircle,
   Clock3,
@@ -19,14 +19,14 @@ import {
   FileText,
   Plus,
   Loader2,
-} from 'lucide-react';
+} from "lucide-react";
 
 import {
   workflowsApi,
   type Workflow,
   type AuditLog,
   type WorkflowAuditRun,
-} from '@/lib/api';
+} from "@/lib/api";
 import {
   Badge,
   Button,
@@ -39,13 +39,19 @@ import {
   Modal,
   ModalFooter,
   Textarea,
-} from '@/components/ui';
+} from "@/components/ui";
 
 type WorkflowGraphProps = {
   workflow: Workflow;
 };
 
-type StatusVariant = 'default' | 'success' | 'error' | 'warning' | 'info' | 'primary';
+type StatusVariant =
+  | "default"
+  | "success"
+  | "error"
+  | "warning"
+  | "info"
+  | "primary";
 
 function toReactFlowNodes(workflow: Workflow): Node[] {
   const sourceNodes = Array.isArray(workflow.nodes) ? workflow.nodes : [];
@@ -54,11 +60,11 @@ function toReactFlowNodes(workflow: Workflow): Node[] {
     return [
       {
         id: `empty-${workflow.id}`,
-        type: 'default',
+        type: "default",
         position: { x: 140, y: 90 },
         draggable: false,
         data: {
-          label: 'No workflow nodes available for this run',
+          label: "No workflow nodes available for this run",
         },
       },
     ];
@@ -67,12 +73,12 @@ function toReactFlowNodes(workflow: Workflow): Node[] {
   return sourceNodes.map((node, index) => {
     const hasValidPosition =
       node.position &&
-      typeof node.position.x === 'number' &&
-      typeof node.position.y === 'number';
+      typeof node.position.x === "number" &&
+      typeof node.position.y === "number";
 
     return {
       id: node.id,
-      type: 'default',
+      type: "default",
       position: hasValidPosition
         ? node.position
         : {
@@ -81,7 +87,7 @@ function toReactFlowNodes(workflow: Workflow): Node[] {
           },
       draggable: true,
       data: {
-        label: `${node.label || node.operation || 'Step'} (${node.service || 'system'})`,
+        label: `${node.label || node.operation || "Step"} (${node.service || "system"})`,
       },
     };
   });
@@ -98,13 +104,13 @@ function toReactFlowEdges(workflow: Workflow): Edge[] {
   }));
 }
 
-function statusVariant(status: Workflow['status']): StatusVariant {
-  if (status === 'completed') return 'success';
-  if (status === 'failed') return 'error';
-  if (status === 'running') return 'info';
-  if (status === 'paused') return 'warning';
-  if (status === 'ready') return 'primary';
-  return 'default';
+function statusVariant(status: Workflow["status"]): StatusVariant {
+  if (status === "completed") return "success";
+  if (status === "failed") return "error";
+  if (status === "running") return "info";
+  if (status === "paused") return "warning";
+  if (status === "ready") return "primary";
+  return "default";
 }
 
 function WorkflowGraph({ workflow }: WorkflowGraphProps) {
@@ -130,16 +136,16 @@ function WorkflowGraph({ workflow }: WorkflowGraphProps) {
 
 export default function WorkflowsPage() {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [draftPrompt, setDraftPrompt] = useState<string>('');
+  const [draftPrompt, setDraftPrompt] = useState<string>("");
 
   const [auditModalOpen, setAuditModalOpen] = useState(false);
-  const [auditWorkflowName, setAuditWorkflowName] = useState('');
+  const [auditWorkflowName, setAuditWorkflowName] = useState("");
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [auditRuns, setAuditRuns] = useState<WorkflowAuditRun[]>([]);
   const [isAuditLoading, setIsAuditLoading] = useState(false);
@@ -149,7 +155,7 @@ export default function WorkflowsPage() {
     const response = await workflowsApi.list();
 
     if (!response.success || !response.data) {
-      setError(response.error || 'Failed to load workflows');
+      setError(response.error || "Failed to load workflows");
       setIsLoading(false);
       return;
     }
@@ -176,8 +182,8 @@ export default function WorkflowsPage() {
   }, [workflows, search]);
 
   const handlePause = useCallback(async (workflow: Workflow) => {
-    if (workflow.status !== 'running') {
-      setError('Only running workflows can be paused.');
+    if (workflow.status !== "running") {
+      setError("Only running workflows can be paused.");
       return;
     }
 
@@ -186,88 +192,7 @@ export default function WorkflowsPage() {
     setBusyId(null);
 
     if (!response.success || !response.data) {
-      setError(response.error || 'Failed to pause workflow');
-      return;
-    }
-
-    setWorkflows((current) =>
-      current.map((item) => (item.id === workflow.id ? response.data as Workflow : item)),
-    );
-    setError(null);
-  }, []);
-
-  const handleDelete = useCallback(async (workflowId: string) => {
-    setBusyId(workflowId);
-    const response = await workflowsApi.delete(workflowId);
-    setBusyId(null);
-
-    if (!response.success) {
-      setError(response.error || 'Failed to delete workflow');
-      return;
-    }
-
-    setWorkflows((current) => current.filter((item) => item.id !== workflowId));
-    if (editingId === workflowId) {
-      setEditingId(null);
-      setDraftPrompt('');
-    }
-    setError(null);
-  }, [editingId]);
-
-  const handleEditToggle = useCallback((workflow: Workflow) => {
-    if (editingId === workflow.id) {
-      setEditingId(null);
-      setDraftPrompt('');
-      return;
-    }
-
-    setEditingId(workflow.id);
-    setDraftPrompt(workflow.description || '');
-  }, [editingId]);
-
-  const handleCreateWorkflow = useCallback(async (sourceWorkflow: Workflow) => {
-    const prompt = draftPrompt.trim() || sourceWorkflow.description?.trim() || sourceWorkflow.name;
-    if (!prompt) {
-      setError('Prompt cannot be empty.');
-      return;
-    }
-
-    setBusyId(sourceWorkflow.id);
-    const response = await workflowsApi.create({
-      name: `${sourceWorkflow.name} (edited)`,
-      description: prompt,
-      nodes: sourceWorkflow.nodes,
-      edges: sourceWorkflow.edges,
-      status: 'draft',
-    });
-    setBusyId(null);
-
-    if (!response.success || !response.data) {
-      setError(response.error || 'Failed to create workflow from edited prompt');
-      return;
-    }
-
-    setWorkflows((current) => [response.data as Workflow, ...current]);
-    setEditingId(null);
-    setDraftPrompt('');
-    setError(null);
-  }, [draftPrompt]);
-
-  const handleSavePrompt = useCallback(async (workflow: Workflow) => {
-    const prompt = draftPrompt.trim();
-    if (!prompt) {
-      setError('Prompt cannot be empty.');
-      return;
-    }
-
-    setBusyId(workflow.id);
-    const response = await workflowsApi.update(workflow.id, {
-      description: prompt,
-    });
-    setBusyId(null);
-
-    if (!response.success || !response.data) {
-      setError(response.error || 'Failed to save workflow prompt');
+      setError(response.error || "Failed to pause workflow");
       return;
     }
 
@@ -276,10 +201,112 @@ export default function WorkflowsPage() {
         item.id === workflow.id ? (response.data as Workflow) : item,
       ),
     );
-    setEditingId(null);
-    setDraftPrompt('');
     setError(null);
-  }, [draftPrompt]);
+  }, []);
+
+  const handleDelete = useCallback(
+    async (workflowId: string) => {
+      setBusyId(workflowId);
+      const response = await workflowsApi.delete(workflowId);
+      setBusyId(null);
+
+      if (!response.success) {
+        setError(response.error || "Failed to delete workflow");
+        return;
+      }
+
+      setWorkflows((current) =>
+        current.filter((item) => item.id !== workflowId),
+      );
+      if (editingId === workflowId) {
+        setEditingId(null);
+        setDraftPrompt("");
+      }
+      setError(null);
+    },
+    [editingId],
+  );
+
+  const handleEditToggle = useCallback(
+    (workflow: Workflow) => {
+      if (editingId === workflow.id) {
+        setEditingId(null);
+        setDraftPrompt("");
+        return;
+      }
+
+      setEditingId(workflow.id);
+      setDraftPrompt(workflow.description || "");
+    },
+    [editingId],
+  );
+
+  const handleCreateWorkflow = useCallback(
+    async (sourceWorkflow: Workflow) => {
+      const prompt =
+        draftPrompt.trim() ||
+        sourceWorkflow.description?.trim() ||
+        sourceWorkflow.name;
+      if (!prompt) {
+        setError("Prompt cannot be empty.");
+        return;
+      }
+
+      setBusyId(sourceWorkflow.id);
+      const response = await workflowsApi.create({
+        name: `${sourceWorkflow.name} (edited)`,
+        description: prompt,
+        nodes: sourceWorkflow.nodes,
+        edges: sourceWorkflow.edges,
+        status: "draft",
+      });
+      setBusyId(null);
+
+      if (!response.success || !response.data) {
+        setError(
+          response.error || "Failed to create workflow from edited prompt",
+        );
+        return;
+      }
+
+      setWorkflows((current) => [response.data as Workflow, ...current]);
+      setEditingId(null);
+      setDraftPrompt("");
+      setError(null);
+    },
+    [draftPrompt],
+  );
+
+  const handleSavePrompt = useCallback(
+    async (workflow: Workflow) => {
+      const prompt = draftPrompt.trim();
+      if (!prompt) {
+        setError("Prompt cannot be empty.");
+        return;
+      }
+
+      setBusyId(workflow.id);
+      const response = await workflowsApi.update(workflow.id, {
+        description: prompt,
+      });
+      setBusyId(null);
+
+      if (!response.success || !response.data) {
+        setError(response.error || "Failed to save workflow prompt");
+        return;
+      }
+
+      setWorkflows((current) =>
+        current.map((item) =>
+          item.id === workflow.id ? (response.data as Workflow) : item,
+        ),
+      );
+      setEditingId(null);
+      setDraftPrompt("");
+      setError(null);
+    },
+    [draftPrompt],
+  );
 
   const handleAudits = useCallback(async (workflow: Workflow) => {
     setAuditModalOpen(true);
@@ -288,11 +315,14 @@ export default function WorkflowsPage() {
     setAuditRuns([]);
     setIsAuditLoading(true);
 
-    const response = await workflowsApi.audits(workflow.id, { limit: 100, offset: 0 });
+    const response = await workflowsApi.audits(workflow.id, {
+      limit: 100,
+      offset: 0,
+    });
     setIsAuditLoading(false);
 
     if (!response.success || !response.data) {
-      setError(response.error || 'Failed to load workflow audits');
+      setError(response.error || "Failed to load workflow audits");
       return;
     }
 
@@ -310,7 +340,8 @@ export default function WorkflowsPage() {
       run,
       logs: auditLogs.filter(
         (log) =>
-          (typeof log.runNumber === 'number' && log.runNumber === run.runNumber) ||
+          (typeof log.runNumber === "number" &&
+            log.runNumber === run.runNumber) ||
           log.executionId === run.executionId,
       ),
     }));
@@ -325,7 +356,8 @@ export default function WorkflowsPage() {
           <div>
             <CardTitle>Workflows</CardTitle>
             <CardDescription>
-              Search and manage workflows from PostgreSQL with prompt editing, audits, and drag view.
+              Search and manage workflows from PostgreSQL with prompt editing,
+              audits, and drag view.
             </CardDescription>
           </div>
         </CardHeader>
@@ -338,7 +370,11 @@ export default function WorkflowsPage() {
               isSearch
               leftIcon={<Search className="h-4 w-4" />}
             />
-            <Button variant="outline" onClick={() => void loadWorkflows()} isLoading={isLoading}>
+            <Button
+              variant="outline"
+              onClick={() => void loadWorkflows()}
+              isLoading={isLoading}
+            >
               Refresh
             </Button>
           </div>
@@ -402,19 +438,19 @@ export default function WorkflowsPage() {
                     size="sm"
                     variant="outline"
                     onClick={() => void handlePause(workflow)}
-                    disabled={workflow.status !== 'running'}
-                    isLoading={isBusy && workflow.status === 'running'}
+                    disabled={workflow.status !== "running"}
+                    isLoading={isBusy && workflow.status === "running"}
                     leftIcon={<Pause className="h-3.5 w-3.5" />}
                   >
                     Pause
                   </Button>
                   <Button
                     size="sm"
-                    variant={isEditing ? 'secondary' : 'outline'}
+                    variant={isEditing ? "secondary" : "outline"}
                     onClick={() => handleEditToggle(workflow)}
                     leftIcon={<Pencil className="h-3.5 w-3.5" />}
                   >
-                    {isEditing ? 'Cancel' : 'Edit Prompt'}
+                    {isEditing ? "Cancel" : "Edit Prompt"}
                   </Button>
                   {isEditing ? (
                     <Button
@@ -459,7 +495,9 @@ export default function WorkflowsPage() {
 
               <CardContent className="space-y-4">
                 <div>
-                  <p className="mb-2 text-sm font-medium text-content-primary">Prompt</p>
+                  <p className="mb-2 text-sm font-medium text-content-primary">
+                    Prompt
+                  </p>
                   <Textarea
                     value={promptValue}
                     disabled={!isEditing}
@@ -470,8 +508,27 @@ export default function WorkflowsPage() {
                 </div>
 
                 <div>
-                  <p className="mb-2 text-sm font-medium text-content-primary">Workflow Module</p>
+                  <p className="mb-2 text-sm font-medium text-content-primary">
+                    Workflow Module
+                  </p>
                   <WorkflowGraph workflow={workflow} />
+                </div>
+
+                <div>
+                  <p className="mb-2 text-sm font-medium text-content-primary">
+                    Generated JSON
+                  </p>
+                  <pre className="max-h-56 overflow-auto rounded-lg border border-border bg-surface-secondary p-3 text-xs text-content-secondary">
+                    {JSON.stringify(
+                      workflow.generatedJson ?? {
+                        prompt: workflow.description,
+                        nodes: workflow.nodes,
+                        edges: workflow.edges,
+                      },
+                      null,
+                      2,
+                    )}
+                  </pre>
                 </div>
               </CardContent>
             </Card>
@@ -492,46 +549,67 @@ export default function WorkflowsPage() {
           ) : null}
 
           {!isAuditLoading && auditLogs.length === 0 ? (
-            <p className="text-sm text-content-secondary">No audits found for this workflow.</p>
+            <p className="text-sm text-content-secondary">
+              No audits found for this workflow.
+            </p>
           ) : null}
 
           {groupedAuditLogs.map((group) => (
-            <div key={group.run.executionId} className="rounded-lg border border-border bg-surface-secondary p-3">
+            <div
+              key={group.run.executionId}
+              className="rounded-lg border border-border bg-surface-secondary p-3"
+            >
               <div className="mb-2 flex flex-wrap items-center gap-2">
                 <Badge variant="primary">Run #{group.run.runNumber}</Badge>
                 <span className="text-xs text-content-secondary">
-                  {new Date(group.run.startedAt).toLocaleString()} - {new Date(group.run.endedAt).toLocaleString()}
+                  {new Date(group.run.startedAt).toLocaleString()} -{" "}
+                  {new Date(group.run.endedAt).toLocaleString()}
                 </span>
-                <span className="text-xs text-content-tertiary">Logs: {group.run.totalLogs}</span>
+                <span className="text-xs text-content-tertiary">
+                  Logs: {group.run.totalLogs}
+                </span>
                 {group.run.errorCount > 0 ? (
-                  <Badge size="sm" variant="error">Errors: {group.run.errorCount}</Badge>
+                  <Badge size="sm" variant="error">
+                    Errors: {group.run.errorCount}
+                  </Badge>
                 ) : (
-                  <Badge size="sm" variant="success">No errors</Badge>
+                  <Badge size="sm" variant="success">
+                    No errors
+                  </Badge>
                 )}
               </div>
 
               <div className="space-y-2">
                 {group.logs.map((log) => (
-                  <div key={log.id} className="rounded-md border border-border bg-surface-primary p-3">
+                  <div
+                    key={log.id}
+                    className="rounded-md border border-border bg-surface-primary p-3"
+                  >
                     <div className="mb-1 flex items-center gap-2 text-xs">
                       <Badge
                         size="sm"
                         variant={
-                          log.level === 'error'
-                            ? 'error'
-                            : log.level === 'warning'
-                            ? 'warning'
-                            : log.level === 'debug'
-                            ? 'info'
-                            : 'success'
+                          log.level === "error"
+                            ? "error"
+                            : log.level === "warning"
+                              ? "warning"
+                              : log.level === "debug"
+                                ? "info"
+                                : "success"
                         }
                       >
                         {log.level}
                       </Badge>
-                      <span className="text-content-tertiary">{new Date(log.timestamp).toLocaleString()}</span>
+                      <span className="text-content-tertiary">
+                        {new Date(log.timestamp).toLocaleString()}
+                      </span>
                     </div>
-                    <p className="text-sm text-content-primary">{log.message}</p>
-                    <p className="mt-1 text-xs text-content-secondary">{log.action}</p>
+                    <p className="text-sm text-content-primary">
+                      {log.message}
+                    </p>
+                    <p className="mt-1 text-xs text-content-secondary">
+                      {log.action}
+                    </p>
                   </div>
                 ))}
               </div>
@@ -540,26 +618,33 @@ export default function WorkflowsPage() {
 
           {!isAuditLoading && auditRuns.length === 0 && auditLogs.length > 0
             ? auditLogs.map((log) => (
-                <div key={log.id} className="rounded-md border border-border bg-surface-secondary p-3">
+                <div
+                  key={log.id}
+                  className="rounded-md border border-border bg-surface-secondary p-3"
+                >
                   <div className="mb-1 flex items-center gap-2 text-xs">
                     <Badge
                       size="sm"
                       variant={
-                        log.level === 'error'
-                          ? 'error'
-                          : log.level === 'warning'
-                          ? 'warning'
-                          : log.level === 'debug'
-                          ? 'info'
-                          : 'success'
+                        log.level === "error"
+                          ? "error"
+                          : log.level === "warning"
+                            ? "warning"
+                            : log.level === "debug"
+                              ? "info"
+                              : "success"
                       }
                     >
                       {log.level}
                     </Badge>
-                    <span className="text-content-tertiary">{new Date(log.timestamp).toLocaleString()}</span>
+                    <span className="text-content-tertiary">
+                      {new Date(log.timestamp).toLocaleString()}
+                    </span>
                   </div>
                   <p className="text-sm text-content-primary">{log.message}</p>
-                  <p className="mt-1 text-xs text-content-secondary">{log.action}</p>
+                  <p className="mt-1 text-xs text-content-secondary">
+                    {log.action}
+                  </p>
                 </div>
               ))
             : null}

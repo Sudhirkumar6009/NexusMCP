@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { dataStore } from "../data/store.js";
+import type { AuditLog } from "../types/index.js";
 import {
   getEventLogs,
   getEventLogStats,
@@ -9,6 +10,102 @@ import {
 } from "../services/postgres-store.js";
 
 const router = Router();
+
+function inferServiceFromToolName(
+  toolName: string,
+):
+  | "jira"
+  | "slack"
+  | "github"
+  | "postgres"
+  | "google_sheets"
+  | "gmail"
+  | "system" {
+  const normalized = toolName.toLowerCase();
+
+  if (normalized.startsWith("jira.")) return "jira";
+  if (normalized.startsWith("slack.")) return "slack";
+  if (normalized.startsWith("github.")) return "github";
+  if (normalized.startsWith("gmail.")) return "gmail";
+  if (
+    normalized.startsWith("google_sheets.") ||
+    normalized.startsWith("sheets.")
+  ) {
+    return "google_sheets";
+  }
+  if (
+    normalized.startsWith("postgres.") ||
+    normalized.startsWith("postgresql.")
+  ) {
+    return "postgres";
+  }
+
+  return "system";
+}
+
+function mapStepRunToAuditLog(step: StepRunRecord): AuditLog {
+  const status = step.status.toLowerCase();
+  const level: AuditLog["level"] =
+    status === "failed" || status === "error"
+      ? "error"
+      : status === "running" || status === "retrying"
+        ? "warning"
+        : "info";
+
+  return {
+    id: `step-log-${step.stepId}`,
+    timestamp: step.updatedAt,
+    level,
+    service: inferServiceFromToolName(step.toolName),
+    action: "step_run",
+    message: `Step ${step.toolName} ${step.status}`,
+    executionId: step.executionId,
+    workflowId: step.workflowId,
+    details: {
+      stepId: step.stepId,
+      toolName: step.toolName,
+      status: step.status,
+      retryCount: step.retryCount,
+      request: step.inputPayload,
+      response: step.outputPayload,
+    },
+  };
+}
+
+function applyAuditFilters(
+  logs: AuditLog[],
+  filters: {
+    level?: AuditLog["level"];
+    service?: AuditLog["service"];
+    workflowId?: string;
+    search?: string;
+  },
+) {
+  return logs.filter((log) => {
+    if (filters.level && log.level !== filters.level) {
+      return false;
+    }
+
+    if (filters.service && log.service !== filters.service) {
+      return false;
+    }
+
+    if (filters.workflowId && log.workflowId !== filters.workflowId) {
+      return false;
+    }
+
+    if (filters.search) {
+      const query = filters.search.toLowerCase();
+      const inMessage = log.message.toLowerCase().includes(query);
+      const inAction = log.action.toLowerCase().includes(query);
+      if (!inMessage && !inAction) {
+        return false;
+      }
+    }
+
+    return true;
+  });
+}
 
 function mapLogsToStepRunsFallback(limit: number, offset: number) {
   const source = dataStore.getLogs({ limit: 1000, offset: 0 }).logs;
@@ -40,7 +137,7 @@ function mapLogsToStepRunsFallback(limit: number, offset: number) {
 
 // GET /api/logs - List audit logs with filtering
 router.get("/", async (req, res) => {
-  const { level, service, search, limit, offset } = req.query;
+  const { level, service, search, workflowId, limit, offset } = req.query;
 
   const filters = {
     level: level as "info" | "warning" | "error" | "debug" | undefined,
@@ -54,6 +151,7 @@ router.get("/", async (req, res) => {
       | "system"
       | undefined,
     search: search as string | undefined,
+    workflowId: workflowId as string | undefined,
     limit: limit ? parseInt(limit as string, 10) : undefined,
     offset: offset ? parseInt(offset as string, 10) : undefined,
   };
@@ -64,7 +162,29 @@ router.get("/", async (req, res) => {
     }
 
     try {
-      return await getEventLogs(filters);
+      const postgresLogs = await getEventLogs(filters);
+
+      if (postgresLogs.total > 0) {
+        return postgresLogs;
+      }
+
+      // If event_logs is empty, derive audit data from PostgreSQL step_runs.
+      const stepRunResult = await getStepRuns({
+        workflowId: filters.workflowId,
+        search: filters.search,
+        limit: filters.limit ?? 50,
+        offset: filters.offset ?? 0,
+      });
+
+      const derivedLogs = applyAuditFilters(
+        stepRunResult.rows.map(mapStepRunToAuditLog),
+        filters,
+      );
+
+      return {
+        logs: derivedLogs,
+        total: stepRunResult.total,
+      };
     } catch (error) {
       console.warn(
         `PostgreSQL logs query failed; using in-memory fallback: ${
@@ -184,9 +304,51 @@ router.get("/stats", async (_req, res) => {
     try {
       const stats = await getEventLogStats();
 
+      if (stats.total > 0) {
+        return res.json({
+          success: true,
+          data: stats,
+        });
+      }
+
+      // If event_logs is empty, derive statistics from PostgreSQL step_runs.
+      const stepRuns = await getStepRuns({ limit: 500, offset: 0 });
+      const derived = stepRuns.rows.map(mapStepRunToAuditLog);
+
+      const derivedStats = {
+        total: derived.length,
+        byLevel: {
+          info: 0,
+          warning: 0,
+          error: 0,
+          debug: 0,
+        },
+        byService: {
+          jira: 0,
+          slack: 0,
+          github: 0,
+          postgres: 0,
+          google_sheets: 0,
+          gmail: 0,
+          system: 0,
+        },
+        last24Hours: 0,
+      };
+
+      const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+
+      for (const log of derived) {
+        derivedStats.byLevel[log.level] += 1;
+        derivedStats.byService[log.service] += 1;
+
+        if (new Date(log.timestamp).getTime() > oneDayAgo) {
+          derivedStats.last24Hours += 1;
+        }
+      }
+
       return res.json({
         success: true,
-        data: stats,
+        data: derivedStats,
       });
     } catch (error) {
       console.warn(

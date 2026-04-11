@@ -2,7 +2,7 @@
 export interface DAGNode {
   id: string;
   type: "trigger" | "action" | "condition" | "output";
-  service: "jira" | "slack" | "github" | "postgres";
+  service: "jira" | "slack" | "github" | "google_sheets" | "gmail" | "postgres";
   operation: string;
   label: string;
   config: Record<string, unknown>;
@@ -29,6 +29,8 @@ export interface Workflow {
   createdAt: string;
   updatedAt: string;
   executionHistory: WorkflowExecution[];
+  ownerUserId?: string;
+  generatedJson?: Record<string, unknown>;
 }
 
 export interface WorkflowExecution {

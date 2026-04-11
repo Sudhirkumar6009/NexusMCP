@@ -47,6 +47,19 @@ type ApiLogRow = {
   details?: Record<string, unknown>;
 };
 
+type ApiStepRunRow = {
+  stepId: string;
+  executionId?: string;
+  workflowId?: string;
+  toolName: string;
+  inputPayload?: unknown;
+  outputPayload?: unknown;
+  status: string;
+  retryCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type LogStatsData = {
   total: number;
   byLevel: Record<LogLevel, number>;
@@ -95,6 +108,38 @@ function mapLogRow(row: ApiLogRow): AuditLogEntry {
   };
 }
 
+function mapStepRunRowToLogRow(row: ApiStepRunRow): ApiLogRow {
+  const normalizedStatus = row.status.toLowerCase();
+  const level: LogLevel =
+    normalizedStatus === "failed" || normalizedStatus === "error"
+      ? "error"
+      : normalizedStatus === "running" || normalizedStatus === "retrying"
+        ? "warning"
+        : "info";
+
+  const serviceToken = row.toolName.split(".")[0]?.toLowerCase() || "system";
+  const service = serviceToken === "sheets" ? "google_sheets" : serviceToken;
+
+  return {
+    id: `step-${row.stepId}`,
+    timestamp: row.updatedAt,
+    level,
+    service,
+    action: "step_run",
+    message: `Step ${row.toolName} ${row.status}`,
+    workflowId: row.workflowId,
+    executionId: row.executionId,
+    details: {
+      stepId: row.stepId,
+      toolName: row.toolName,
+      retryCount: row.retryCount,
+      request: row.inputPayload,
+      response: row.outputPayload,
+      derivedFrom: "step_runs",
+    },
+  };
+}
+
 const statusConfig: Record<
   LogStatus,
   {
@@ -128,10 +173,33 @@ export default function LogsPage() {
       ]);
 
       if (logsResponse.success && Array.isArray(logsResponse.data)) {
-        const mapped = (logsResponse.data as unknown as ApiLogRow[]).map(
+        const mappedLogs = (logsResponse.data as unknown as ApiLogRow[]).map(
           mapLogRow,
         );
-        setLogs(mapped);
+
+        if (mappedLogs.length > 0) {
+          setLogs(mappedLogs);
+        } else {
+          const stepRunsResponse = await logsApi.listStepRuns({
+            limit: 500,
+            offset: 0,
+          });
+
+          if (
+            stepRunsResponse.success &&
+            Array.isArray(stepRunsResponse.data)
+          ) {
+            const mappedFromStepRuns = (
+              stepRunsResponse.data as unknown as ApiStepRunRow[]
+            )
+              .map(mapStepRunRowToLogRow)
+              .map(mapLogRow);
+
+            setLogs(mappedFromStepRuns);
+          } else {
+            setLogs([]);
+          }
+        }
       }
 
       if (statsResponse.success && statsResponse.data) {
