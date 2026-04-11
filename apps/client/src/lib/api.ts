@@ -219,6 +219,12 @@ export const authApi = {
       body: JSON.stringify(updates),
     }),
 
+  changePassword: (currentPassword: string, newPassword: string) =>
+    fetchApi<void>("/auth/password", {
+      method: "PUT",
+      body: JSON.stringify({ currentPassword, newPassword }),
+    }),
+
   getSessions: () => fetchApi<Session[]>("/auth/sessions"),
 
   revokeSession: (id: string) =>

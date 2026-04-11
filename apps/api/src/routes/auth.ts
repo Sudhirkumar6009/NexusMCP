@@ -570,6 +570,104 @@ router.put("/me", authenticateToken, async (req: Request, res: Response) => {
   }
 });
 
+// PUT /api/auth/password - Update current user's password
+router.put(
+  "/password",
+  authenticateToken,
+  async (req: Request, res: Response) => {
+    try {
+      const userId = (req as AuthenticatedRequest).userId;
+      const { currentPassword, newPassword } = req.body as {
+        currentPassword?: string;
+        newPassword?: string;
+      };
+
+      if (userId === TEST_LOGIN_USER_ID) {
+        res.status(400).json({
+          success: false,
+          error: "Test login cannot update password",
+        });
+        return;
+      }
+
+      if (!currentPassword || !newPassword) {
+        res.status(400).json({
+          success: false,
+          error: "Current password and new password are required",
+        });
+        return;
+      }
+
+      if (newPassword.length < 8) {
+        res.status(400).json({
+          success: false,
+          error: "New password must be at least 8 characters",
+        });
+        return;
+      }
+
+      if (currentPassword === newPassword) {
+        res.status(400).json({
+          success: false,
+          error: "New password must be different from current password",
+        });
+        return;
+      }
+
+      const user = (await User.findById(userId).select("+password")) as
+        | IUser
+        | null;
+
+      if (!user) {
+        res.status(404).json({
+          success: false,
+          error: "User not found",
+        });
+        return;
+      }
+
+      if (!user.password) {
+        res.status(400).json({
+          success: false,
+          error: "This account uses Google sign-in and has no password",
+        });
+        return;
+      }
+
+      const isValidPassword = await user.comparePassword(currentPassword);
+      if (!isValidPassword) {
+        res.status(401).json({
+          success: false,
+          error: "Current password is incorrect",
+        });
+        return;
+      }
+
+      user.password = newPassword;
+      await user.save();
+
+      dataStore.addLog({
+        level: "info",
+        service: "system",
+        action: "user_password_changed",
+        message: `User updated password: ${user.email}`,
+        userId: user._id.toString(),
+      });
+
+      res.json({
+        success: true,
+        message: "Password updated successfully",
+      });
+    } catch (error) {
+      console.error("Update password error:", error);
+      res.status(500).json({
+        success: false,
+        error: "Failed to update password",
+      });
+    }
+  },
+);
+
 // POST /api/auth/logout - Logout
 router.post("/logout", (_req: Request, res: Response) => {
   res.clearCookie("auth_token");
