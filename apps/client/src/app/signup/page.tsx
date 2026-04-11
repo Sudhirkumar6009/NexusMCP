@@ -13,6 +13,7 @@ import {
   User,
   Check,
 } from "lucide-react";
+import { API_AUTH_BASE_URL, authApi } from "@/lib/api";
 
 export default function SignupPage() {
   const router = useRouter();
@@ -40,8 +41,7 @@ export default function SignupPage() {
   const handleGoogleSignup = () => {
     setIsGoogleLoading(true);
     setError("");
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000";
-    window.location.href = `${apiUrl}/auth/google`;
+    window.location.href = `${API_AUTH_BASE_URL}/auth/google`;
   };
 
   const handleEmailSignup = async (e: React.FormEvent) => {
@@ -57,15 +57,11 @@ export default function SignupPage() {
     }
 
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000";
-      const response = await fetch(`${apiUrl}/api/auth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(formData),
-        credentials: "include",
-      });
-
-      const data = await response.json();
+      const data = await authApi.register(
+        formData.name,
+        formData.email,
+        formData.password,
+      );
 
       if (data.success) {
         if (data.data?.token) {

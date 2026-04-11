@@ -12,6 +12,7 @@ import {
   EyeOff,
   ShieldCheck,
 } from "lucide-react";
+import { API_AUTH_BASE_URL, authApi } from "@/lib/api";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -25,7 +26,6 @@ export default function LoginPage() {
     email: "",
     password: "",
   });
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000";
 
   useEffect(() => {
     const prefersDark = window.matchMedia(
@@ -41,7 +41,7 @@ export default function LoginPage() {
     setIsGoogleLoading(true);
     setError("");
     // Redirect to backend Google OAuth endpoint
-    window.location.href = `${apiUrl}/auth/google`;
+    window.location.href = `${API_AUTH_BASE_URL}/auth/google`;
   };
 
   const handleTestLogin = async () => {
@@ -49,17 +49,7 @@ export default function LoginPage() {
     setError("");
 
     try {
-      const response = await fetch(`${apiUrl}/api/auth/test-login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email: "test123@gmail.com",
-          password: "Test@123",
-        }),
-        credentials: "include",
-      });
-
-      const data = await response.json();
+      const data = await authApi.testLogin("test123@gmail.com", "Test@123");
 
       if (data.success) {
         if (data.data?.token) {
@@ -83,15 +73,7 @@ export default function LoginPage() {
     setError("");
 
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000";
-      const response = await fetch(`${apiUrl}/api/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(formData),
-        credentials: "include",
-      });
-
-      const data = await response.json();
+      const data = await authApi.login(formData.email, formData.password);
 
       if (data.success) {
         // Store token in localStorage

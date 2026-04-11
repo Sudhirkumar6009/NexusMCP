@@ -29,7 +29,6 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Modal, ModalFooter } from "@/components/ui/modal";
 import { Textarea } from "@/components/ui/textarea";
-import { ConnectorCredentialsModal } from "@/components/integrations/connector-credentials-modal";
 import { workflowsApi } from "@/lib/api";
 import {
   createAgentFlowGraph,
@@ -40,7 +39,7 @@ import {
 } from "@/lib/agentic-flow";
 import { cn } from "@/lib/utils";
 import { useIntegrations } from "@/context/integrations-context";
-import type { Integration, IntegrationCredentials, ServiceId } from "@/types";
+import type { ServiceId } from "@/types";
 import type {
   AgenticToolDefinition,
   AgentFlowPlan,
@@ -589,12 +588,9 @@ function inferToolInputs(
 }
 
 export function AgenticFlowRunner() {
-  const { integrations, connectIntegration } = useIntegrations();
+  const { integrations } = useIntegrations();
   const abortRef = useRef<AbortController | null>(null);
   const integrationsRef = useRef(integrations);
-  const modalResolveRef = useRef<
-    ((result: ConnectorResolution) => void) | null
-  >(null);
 
   const [prompt, setPrompt] = useState(SAMPLE_PROMPT);
   const [runState, setRunState] = useState<AgentRunState>("idle");
@@ -604,25 +600,12 @@ export function AgenticFlowRunner() {
     Record<string, XYPosition>
   >({});
   const [manualEdges, setManualEdges] = useState<Edge[]>([]);
-  const [pendingConnectorId, setPendingConnectorId] =
-    useState<ServiceId | null>(null);
   const [auditTrail, setAuditTrail] = useState<AgentToolAuditUpdate[]>([]);
   const [showNoProviderModal, setShowNoProviderModal] = useState(false);
 
   useEffect(() => {
     integrationsRef.current = integrations;
   }, [integrations]);
-
-  const pendingConnector = useMemo(() => {
-    if (!pendingConnectorId) {
-      return null;
-    }
-    return (
-      integrations.find(
-        (integration) => integration.id === pendingConnectorId,
-      ) ?? null
-    );
-  }, [integrations, pendingConnectorId]);
 
   const graph = useMemo(() => {
     if (!plan) {
@@ -709,47 +692,6 @@ export function AgenticFlowRunner() {
     setManualEdges((prev) => applyEdgeChanges(changes, prev));
   }, []);
 
-  const resolveConnectorModal = useCallback((result: ConnectorResolution) => {
-    const resolver = modalResolveRef.current;
-    modalResolveRef.current = null;
-    setPendingConnectorId(null);
-    resolver?.(result);
-  }, []);
-
-  const resolveConnectorConnection = useCallback((integration: Integration) => {
-    return new Promise<ConnectorResolution>((resolve) => {
-      modalResolveRef.current = resolve;
-      setPendingConnectorId(integration.id);
-    });
-  }, []);
-
-  const handleConnectorModalClose = useCallback(() => {
-    resolveConnectorModal("cancelled");
-  }, [resolveConnectorModal]);
-
-  const handleConnectorCredentialsSave = useCallback(
-    async (id: ServiceId, credentials: IntegrationCredentials) => {
-      await connectIntegration(id, credentials);
-
-      // Keep a live local snapshot in sync so the running executor sees the
-      // connected state immediately, without waiting for a rerender.
-      integrationsRef.current = integrationsRef.current.map((integration) =>
-        integration.id === id
-          ? {
-              ...integration,
-              status: "connected",
-              enabled: true,
-              credentials,
-              lastSynced: new Date(),
-            }
-          : integration,
-      );
-
-      resolveConnectorModal("connected");
-    },
-    [connectIntegration, resolveConnectorModal],
-  );
-
   const handleStop = useCallback(() => {
     if (!abortRef.current) {
       return;
@@ -771,15 +713,12 @@ export function AgenticFlowRunner() {
       return next;
     });
 
-    resolveConnectorModal("cancelled");
-
     setRunState("stopped");
-  }, [resolveConnectorModal]);
+  }, []);
 
   const handleReset = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
-    resolveConnectorModal("cancelled");
     setShowNoProviderModal(false);
     setNodePositionOverrides({});
     setManualEdges([]);
@@ -787,7 +726,7 @@ export function AgenticFlowRunner() {
     setRuntime({});
     setAuditTrail([]);
     setRunState("idle");
-  }, [resolveConnectorModal]);
+  }, []);
 
   const handleRun = useCallback(async () => {
     const trimmedPrompt = prompt.trim();
@@ -797,7 +736,6 @@ export function AgenticFlowRunner() {
 
     abortRef.current?.abort();
     abortRef.current = null;
-    resolveConnectorModal("cancelled");
     setShowNoProviderModal(false);
     setNodePositionOverrides({});
     setManualEdges([]);
@@ -885,7 +823,6 @@ export function AgenticFlowRunner() {
         integrationsRef.current.find(
           (integration) => integration.id === serviceId,
         ),
-      resolveConnectorConnection,
     });
 
     if (abortRef.current === controller) {
@@ -897,8 +834,6 @@ export function AgenticFlowRunner() {
     handleStatusUpdate,
     integrations,
     prompt,
-    resolveConnectorConnection,
-    resolveConnectorModal,
   ]);
 
   return (
@@ -1113,13 +1048,6 @@ export function AgenticFlowRunner() {
         )}
       </div>
 
-      <ConnectorCredentialsModal
-        integration={pendingConnector}
-        isOpen={Boolean(pendingConnector)}
-        onClose={handleConnectorModalClose}
-        onSave={handleConnectorCredentialsSave}
-      />
-
       <Modal
         isOpen={showNoProviderModal}
         onClose={() => setShowNoProviderModal(false)}
@@ -1139,5 +1067,3 @@ export function AgenticFlowRunner() {
     </Card>
   );
 }
-
-type ConnectorResolution = "connected" | "cancelled" | "failed";

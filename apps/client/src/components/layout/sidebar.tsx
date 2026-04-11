@@ -126,7 +126,7 @@ export function Sidebar() {
                   )}
                   title={`PostgreSQL logs: ${auditTotalCount} total, ${auditErrorCount} errors`}
                 >
-                  {auditTotalCount > 99 ? "99+" : auditTotalCount}
+                  {auditTotalCount > 99 ? "21" : auditTotalCount}
                 </span>
               ) : null}
             </Link>

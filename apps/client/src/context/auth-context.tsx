@@ -1,9 +1,24 @@
-'use client';
+"use client";
 
-import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
-import { User, UserRole, UserPermissions, Session, GlobalSettings, LLMConfig, ExecutionPolicy } from '@/types';
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useCallback,
+  useEffect,
+} from "react";
+import {
+  User,
+  UserRole,
+  UserPermissions,
+  Session,
+  GlobalSettings,
+  LLMConfig,
+  ExecutionPolicy,
+} from "@/types";
+import { authApi } from "@/lib/api";
 
-const AUTH_TOKEN_UPDATED_EVENT = 'auth-token-updated';
+const AUTH_TOKEN_UPDATED_EVENT = "auth-token-updated";
 
 const rolePermissions: Record<UserRole, UserPermissions> = {
   admin: {
@@ -51,16 +66,18 @@ interface BackendUser {
 }
 
 function toRole(role?: string): UserRole {
-  return role === 'admin' || role === 'operator' || role === 'viewer' ? role : 'viewer';
+  return role === "admin" || role === "operator" || role === "viewer"
+    ? role
+    : "viewer";
 }
 
 function mapBackendUser(data: BackendUser): User {
   const role = toRole(data.role);
 
   return {
-    id: data.id || data._id || 'user-1',
-    email: data.email || '',
-    name: data.name || 'User',
+    id: data.id || data._id || "user-1",
+    email: data.email || "",
+    name: data.name || "User",
     avatar: data.avatar,
     role,
     permissions: rolePermissions[role],
@@ -76,23 +93,23 @@ function mapBackendUser(data: BackendUser): User {
 // Default sessions
 const defaultSessions: Session[] = [
   {
-    id: 'session-1',
-    userId: 'user-1',
-    device: 'Windows PC',
-    browser: 'Chrome 120',
-    ip: '192.168.1.100',
-    location: 'San Francisco, CA',
+    id: "session-1",
+    userId: "user-1",
+    device: "Windows PC",
+    browser: "Chrome 120",
+    ip: "192.168.1.100",
+    location: "San Francisco, CA",
     createdAt: new Date(),
     lastActiveAt: new Date(),
     isCurrent: true,
   },
   {
-    id: 'session-2',
-    userId: 'user-1',
-    device: 'MacBook Pro',
-    browser: 'Safari 17',
-    ip: '192.168.1.101',
-    location: 'San Francisco, CA',
+    id: "session-2",
+    userId: "user-1",
+    device: "MacBook Pro",
+    browser: "Safari 17",
+    ip: "192.168.1.101",
+    location: "San Francisco, CA",
     createdAt: new Date(Date.now() - 1000 * 60 * 60 * 24), // 1 day ago
     lastActiveAt: new Date(Date.now() - 1000 * 60 * 30), // 30 mins ago
     isCurrent: false,
@@ -102,9 +119,9 @@ const defaultSessions: Session[] = [
 // Default settings
 const defaultSettings: GlobalSettings = {
   llmConfig: {
-    provider: 'anthropic',
-    model: 'claude-3-sonnet',
-    apiKey: '',
+    provider: "anthropic",
+    model: "claude-3-sonnet",
+    apiKey: "",
     maxTokens: 4096,
     temperature: 0.7,
   },
@@ -150,34 +167,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [settings, setSettings] = useState<GlobalSettings>(defaultSettings);
 
   const refreshUser = useCallback(async () => {
-    const token = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null;
+    const token =
+      typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
 
     if (!token) {
       setUser(null);
       return;
     }
 
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
-
     try {
-      const response = await fetch(`${apiUrl}/api/auth/me`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-        credentials: 'include',
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to load user profile');
-      }
-
-      const payload = await response.json();
+      const payload = await authApi.me();
       if (payload?.success && payload.data) {
         setUser(mapBackendUser(payload.data as BackendUser));
         return;
       }
 
-      throw new Error('Invalid profile response');
+      throw new Error("Invalid profile response");
     } catch {
       setUser(null);
     }
@@ -191,55 +196,50 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
 
     const onStorage = (event: StorageEvent) => {
-      if (event.key === 'auth_token') {
+      if (event.key === "auth_token") {
         void refreshUser();
       }
     };
 
     window.addEventListener(AUTH_TOKEN_UPDATED_EVENT, onTokenUpdated);
-    window.addEventListener('storage', onStorage);
+    window.addEventListener("storage", onStorage);
 
     return () => {
       window.removeEventListener(AUTH_TOKEN_UPDATED_EVENT, onTokenUpdated);
-      window.removeEventListener('storage', onStorage);
+      window.removeEventListener("storage", onStorage);
     };
   }, [refreshUser]);
 
-  const login = useCallback(async (email: string, password: string): Promise<boolean> => {
-    try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
-      const response = await fetch(`${apiUrl}/api/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-        credentials: 'include',
-      });
+  const login = useCallback(
+    async (email: string, password: string): Promise<boolean> => {
+      try {
+        const payload = await authApi.login(email, password);
+        if (!payload?.success) {
+          return false;
+        }
 
-      const payload = await response.json();
-      if (!payload?.success) {
+        if (payload.data?.token && typeof window !== "undefined") {
+          localStorage.setItem("auth_token", payload.data.token);
+          window.dispatchEvent(new Event(AUTH_TOKEN_UPDATED_EVENT));
+        }
+
+        if (payload.data?.user) {
+          setUser(mapBackendUser(payload.data.user as BackendUser));
+        } else {
+          await refreshUser();
+        }
+
+        return true;
+      } catch {
         return false;
       }
-
-      if (payload.data?.token && typeof window !== 'undefined') {
-        localStorage.setItem('auth_token', payload.data.token);
-        window.dispatchEvent(new Event(AUTH_TOKEN_UPDATED_EVENT));
-      }
-
-      if (payload.data?.user) {
-        setUser(mapBackendUser(payload.data.user as BackendUser));
-      } else {
-        await refreshUser();
-      }
-
-      return true;
-    } catch {
-      return false;
-    }
-  }, []);
+    },
+    [],
+  );
 
   const logout = useCallback(() => {
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('auth_token');
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("auth_token");
       window.dispatchEvent(new Event(AUTH_TOKEN_UPDATED_EVENT));
     }
     setUser(null);
@@ -258,20 +258,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             role,
             permissions: rolePermissions[role],
           }
-        : null
+        : null,
     );
   }, []);
 
-  const updatePermissions = useCallback((permissions: Partial<UserPermissions>) => {
-    setUser((prev) =>
-      prev
-        ? {
-            ...prev,
-            permissions: { ...prev.permissions, ...permissions },
-          }
-        : null
-    );
-  }, []);
+  const updatePermissions = useCallback(
+    (permissions: Partial<UserPermissions>) => {
+      setUser((prev) =>
+        prev
+          ? {
+              ...prev,
+              permissions: { ...prev.permissions, ...permissions },
+            }
+          : null,
+      );
+    },
+    [],
+  );
 
   const updateSettings = useCallback((newSettings: Partial<GlobalSettings>) => {
     setSettings((prev) => ({ ...prev, ...newSettings }));
@@ -284,12 +287,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }));
   }, []);
 
-  const updateExecutionPolicy = useCallback((policy: Partial<ExecutionPolicy>) => {
-    setSettings((prev) => ({
-      ...prev,
-      executionPolicy: { ...prev.executionPolicy, ...policy },
-    }));
-  }, []);
+  const updateExecutionPolicy = useCallback(
+    (policy: Partial<ExecutionPolicy>) => {
+      setSettings((prev) => ({
+        ...prev,
+        executionPolicy: { ...prev.executionPolicy, ...policy },
+      }));
+    },
+    [],
+  );
 
   const terminateSession = useCallback((sessionId: string) => {
     setSessions((prev) => prev.filter((s) => s.id !== sessionId));
@@ -322,7 +328,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 export function useAuth() {
   const context = useContext(AuthContext);
   if (context === undefined) {
-    throw new Error('useAuth must be used within an AuthProvider');
+    throw new Error("useAuth must be used within an AuthProvider");
   }
   return context;
 }

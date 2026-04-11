@@ -868,16 +868,8 @@ export async function executeAgentFlow(args: {
         continue;
       }
 
-      if (requiredStep) {
-        args.onStatusUpdate({
-          nodeId: requiredStep.id,
-          status: "waiting",
-          detail: `${integration.name} is missing API credentials. Waiting for connection...`,
-        });
-      }
-
       if (!args.resolveConnectorConnection) {
-        const detail = `${integration.name} is not connected and no connection prompt is available.`;
+        const detail = `${integration.name} is not connected. Logging error and continuing without credential prompt.`;
         connectionOutcomes.set(serviceId, {
           result: "failed",
           detail,
@@ -891,6 +883,14 @@ export async function executeAgentFlow(args: {
           });
         }
         continue;
+      }
+
+      if (requiredStep) {
+        args.onStatusUpdate({
+          nodeId: requiredStep.id,
+          status: "waiting",
+          detail: `${integration.name} is missing API credentials. Waiting for connection...`,
+        });
       }
 
       if (requiredStep) {
@@ -1096,21 +1096,21 @@ export async function executeAgentFlow(args: {
       continue;
     }
 
-    args.onStatusUpdate({
-      nodeId: step.id,
-      status: "waiting",
-      detail: `${integration.name} not connected. Waiting for credentials...`,
-    });
-
     if (!args.resolveConnectorConnection) {
       failedConnectorNodeIds.add(step.id);
       args.onStatusUpdate({
         nodeId: step.id,
         status: "failed",
-        detail: `${integration.name} is not connected`,
+        detail: `${integration.name} is not connected. Logging error and skipping credential prompt.`,
       });
       continue;
     }
+
+    args.onStatusUpdate({
+      nodeId: step.id,
+      status: "waiting",
+      detail: `${integration.name} not connected. Waiting for credentials...`,
+    });
 
     const resolution = await args.resolveConnectorConnection(integration);
 

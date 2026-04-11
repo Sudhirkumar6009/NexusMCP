@@ -8,6 +8,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 ConnectionStatus = Literal["connected", "disconnected", "error", "pending"]
+EventSource = Literal["jira", "github", "slack"]
+EventWorkflowName = Literal[
+        "JIRA_START_WORKFLOW",
+        "GITHUB_START_WORKFLOW",
+        "SLACK_START_WORKFLOW",
+]
 AgentPhase = Literal[
     "start",
     "context-analysis",
@@ -153,6 +159,33 @@ class StreamlinedFlowRequest(BaseModel):
         alias="availableTools",
     )
     skip_connectivity_check: bool = False
+
+
+class EventWorkflowRequest(BaseModel):
+    """Request payload for deterministic event workflow orchestration."""
+
+    event: Dict[str, Any] = Field(default_factory=dict)
+
+
+class EventWorkflowStep(BaseModel):
+    """One DAG step for an event workflow execution plan."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    tool: str
+    input: Dict[str, Any] = Field(default_factory=dict)
+    depends_on: List[str] = Field(default_factory=list)
+
+
+class EventWorkflowPlan(BaseModel):
+    """Deterministic workflow plan selected from predefined templates."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow: EventWorkflowName
+    trigger: str
+    steps: List[EventWorkflowStep] = Field(default_factory=list)
 
 
 class StreamlinedFlowResponse(BaseModel):

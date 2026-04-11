@@ -331,13 +331,46 @@ function sanitizeAgenticTools(
 router.get("/", async (req, res) => {
   const userId = getRequestUserId(req);
 
+  const limitRaw = Number(req.query.limit);
+  const limit = Number.isFinite(limitRaw)
+    ? Math.min(Math.max(limitRaw, 1), 100)
+    : undefined;
+
+  const offsetRaw = Number(req.query.offset);
+  const offset = Number.isFinite(offsetRaw) ? Math.max(offsetRaw, 0) : 0;
+
+  const search =
+    typeof req.query.search === "string" ? req.query.search.trim() : "";
+  const query = search.toLowerCase();
+
   const workflows = isPostgresReady()
     ? await listWorkflowDefinitions(userId)
     : dataStore.getWorkflows();
 
+  const filtered = query
+    ? workflows.filter(
+        (workflow) =>
+          workflow.name.toLowerCase().includes(query) ||
+          workflow.description.toLowerCase().includes(query),
+      )
+    : workflows;
+
+  const total = filtered.length;
+  const paged =
+    typeof limit === "number"
+      ? filtered.slice(offset, offset + limit)
+      : filtered;
+
   res.json({
     success: true,
-    data: workflows,
+    data: paged,
+    pagination: {
+      total,
+      limit: limit ?? total,
+      offset,
+      hasMore:
+        typeof limit === "number" ? offset + limit < total : false,
+    },
   });
 });
 
@@ -1044,6 +1077,87 @@ router.post("/agentic-flow", async (req, res) => {
       success: false,
       error: isTimeout
         ? `Agentic service timeout after ${AGENTIC_SERVICE_TIMEOUT_MS}ms`
+        : `Failed to contact agentic service: ${
+            error instanceof Error ? error.message : "Unknown error"
+          }`,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+});
+
+// POST /api/workflows/event-orchestrator - Deterministic event workflow mapping
+router.post("/event-orchestrator", async (req, res) => {
+  const event =
+    req.body?.event && typeof req.body.event === "object" && !Array.isArray(req.body.event)
+      ? (req.body.event as Record<string, unknown>)
+      : req.body && typeof req.body === "object" && !Array.isArray(req.body)
+        ? (req.body as Record<string, unknown>)
+        : null;
+
+  if (!event) {
+    return res.status(400).json({
+      success: false,
+      error: "Event payload is required",
+    });
+  }
+
+  const source =
+    typeof event.source === "string" ? event.source.trim().toLowerCase() : "";
+
+  if (!["jira", "github", "slack"].includes(source)) {
+    return res.status(400).json({
+      success: false,
+      error: "event.source must be one of: jira, github, slack",
+    });
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    AGENTIC_SERVICE_TIMEOUT_MS,
+  );
+
+  try {
+    const upstream = await fetch(`${AGENTIC_SERVICE_URL}/agentic/event-workflow`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ event }),
+      signal: controller.signal,
+    });
+
+    const contentType = upstream.headers.get("content-type") ?? "";
+    const payload = contentType.includes("application/json")
+      ? await upstream.json()
+      : await upstream.text();
+
+    if (!upstream.ok) {
+      const detail =
+        typeof payload === "string"
+          ? payload
+          : ((payload as { detail?: string; error?: string }).detail ??
+            (payload as { detail?: string; error?: string }).error ??
+            "Unknown upstream error");
+
+      return res.status(502).json({
+        success: false,
+        error: `Event orchestrator error: ${detail}`,
+      });
+    }
+
+    res.json({
+      success: true,
+      data: payload,
+    });
+  } catch (error) {
+    const isTimeout = error instanceof Error && error.name === "AbortError";
+
+    return res.status(isTimeout ? 504 : 500).json({
+      success: false,
+      error: isTimeout
+        ? `Event orchestrator timeout after ${AGENTIC_SERVICE_TIMEOUT_MS}ms`
         : `Failed to contact agentic service: ${
             error instanceof Error ? error.message : "Unknown error"
           }`,

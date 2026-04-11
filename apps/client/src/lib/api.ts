@@ -7,8 +7,21 @@ import type {
   AgentFlowRequestPayload,
 } from "@/types/agentic-flow";
 
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000/api";
+const DEFAULT_API_BASE_URL = "http://localhost:3000/api";
+
+function normalizeApiBaseUrl(rawBase?: string): string {
+  const base = (rawBase || DEFAULT_API_BASE_URL).trim().replace(/\/+$/, "");
+
+  // Accept explicit /api or nested API prefixes such as /api/v1.
+  if (/\/api(?:\/|$)/i.test(base)) {
+    return base;
+  }
+
+  return `${base}/api`;
+}
+
+const API_BASE_URL = normalizeApiBaseUrl(process.env.NEXT_PUBLIC_API_URL);
+export const API_AUTH_BASE_URL = API_BASE_URL.replace(/\/api$/i, "");
 
 interface ApiResponse<T> {
   success: boolean;
@@ -38,7 +51,10 @@ async function fetchApi<T>(
   endpoint: string,
   options: RequestInit = {},
 ): Promise<ApiResponse<T>> {
-  const url = `${API_BASE_URL}${endpoint}`;
+  const normalizedEndpoint = endpoint.startsWith("/")
+    ? endpoint
+    : `/${endpoint}`;
+  const url = `${API_BASE_URL}${normalizedEndpoint}`;
   const token =
     typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
 
@@ -84,7 +100,15 @@ async function fetchApi<T>(
 
 // Workflows API
 export const workflowsApi = {
-  list: () => fetchApi<Workflow[]>("/workflows"),
+  list: (options?: { limit?: number; offset?: number; search?: string }) => {
+    const params = new URLSearchParams();
+    if (options?.limit) params.set("limit", String(options.limit));
+    if (options?.offset) params.set("offset", String(options.offset));
+    if (options?.search) params.set("search", options.search);
+
+    const query = params.toString();
+    return fetchApi<Workflow[]>(`/workflows${query ? `?${query}` : ""}`);
+  },
 
   get: (id: string) => fetchApi<Workflow>(`/workflows/${id}`),
 
@@ -147,6 +171,12 @@ export const workflowsApi = {
       method: "POST",
       body: JSON.stringify(payload),
       signal,
+    }),
+
+  eventOrchestrator: (event: Record<string, unknown>) =>
+    fetchApi<EventWorkflowPlan>("/workflows/event-orchestrator", {
+      method: "POST",
+      body: JSON.stringify({ event }),
     }),
 };
 
@@ -242,10 +272,22 @@ export const settingsApi = {
 export const authApi = {
   me: () => fetchApi<User>("/auth/me"),
 
+  register: (name: string, email: string, password: string) =>
+    fetchApi<{ user: User; token: string }>("/auth/register", {
+      method: "POST",
+      body: JSON.stringify({ name, email, password }),
+    }),
+
   updateProfile: (updates: Partial<User>) =>
     fetchApi<User>("/auth/me", {
       method: "PUT",
       body: JSON.stringify(updates),
+    }),
+
+  changePassword: (currentPassword: string, newPassword: string) =>
+    fetchApi<void>("/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ currentPassword, newPassword }),
     }),
 
   getSessions: () => fetchApi<Session[]>("/auth/sessions"),
@@ -255,6 +297,12 @@ export const authApi = {
 
   login: (email: string, password: string) =>
     fetchApi<{ user: User; token: string }>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email, password }),
+    }),
+
+  testLogin: (email: string, password: string) =>
+    fetchApi<{ user: User; token: string }>("/auth/test-login", {
       method: "POST",
       body: JSON.stringify({ email, password }),
     }),
@@ -605,6 +653,8 @@ export type {
   SmartExecutionResult,
   SmartExecutionStep,
   SmartExecutionLog,
+  EventWorkflowPlan,
+  EventWorkflowStep,
 };
 
 // ============================================================================
@@ -684,4 +734,20 @@ interface SmartExecutionResult {
   results: Record<string, unknown>;
   startedAt?: string;
   completedAt?: string;
+}
+
+interface EventWorkflowStep {
+  id: string;
+  tool: string;
+  input: Record<string, unknown>;
+  depends_on: string[];
+}
+
+interface EventWorkflowPlan {
+  workflow:
+    | "JIRA_START_WORKFLOW"
+    | "GITHUB_START_WORKFLOW"
+    | "SLACK_START_WORKFLOW";
+  trigger: string;
+  steps: EventWorkflowStep[];
 }

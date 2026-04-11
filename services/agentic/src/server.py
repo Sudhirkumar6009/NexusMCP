@@ -15,6 +15,7 @@ from .flow_manager import FlowManager
 from .gemini_client import GeminiClient
 from .agents.smart_orchestrator import SmartOrchestrator
 from .agents.default_flow_orchestrator import DefaultFlowOrchestrator, DefaultFlowResponse
+from .agents.event_workflow_orchestrator import EventWorkflowOrchestrator
 from .models import (
     AgentFlowRequest,
     AgentFlowResponse,
@@ -29,6 +30,8 @@ from .models import (
     SmartExecutionStep,
     IntegrationInput,
     ToolDefinition,
+    EventWorkflowRequest,
+    EventWorkflowPlan,
 )
 
 # Configure logging
@@ -48,6 +51,7 @@ gemini_client = GeminiClient(
 
 # Initialize default flow orchestrator
 default_flow_orchestrator = DefaultFlowOrchestrator(gemini_client)
+event_workflow_orchestrator = EventWorkflowOrchestrator()
 
 app = FastAPI(title="NexusMCP Agentic Service", version="0.3.0")
 
@@ -124,6 +128,21 @@ async def default_flow(request: DefaultFlowRequest) -> DefaultFlowResponse:
     except Exception as exc:
         logger.exception(f"Default flow failed: {exc}")
         raise HTTPException(status_code=500, detail=f"Default flow failed: {exc}") from exc
+
+
+@app.post("/agentic/event-workflow", response_model=EventWorkflowPlan)
+async def event_workflow(request: EventWorkflowRequest) -> EventWorkflowPlan:
+    """Generate a deterministic DAG from an incoming event source."""
+    try:
+        return event_workflow_orchestrator.build_plan(request.event)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception(f"Event workflow planning failed: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Event workflow planning failed: {exc}",
+        ) from exc
 
 
 @app.post("/agentic/flow", response_model=AgentFlowResponse)

@@ -47,19 +47,6 @@ type ApiLogRow = {
   details?: Record<string, unknown>;
 };
 
-type ApiStepRunRow = {
-  stepId: string;
-  executionId?: string;
-  workflowId?: string;
-  toolName: string;
-  inputPayload?: unknown;
-  outputPayload?: unknown;
-  status: string;
-  retryCount: number;
-  createdAt: string;
-  updatedAt: string;
-};
-
 type LogStatsData = {
   total: number;
   byLevel: Record<LogLevel, number>;
@@ -108,38 +95,6 @@ function mapLogRow(row: ApiLogRow): AuditLogEntry {
   };
 }
 
-function mapStepRunRowToLogRow(row: ApiStepRunRow): ApiLogRow {
-  const normalizedStatus = row.status.toLowerCase();
-  const level: LogLevel =
-    normalizedStatus === "failed" || normalizedStatus === "error"
-      ? "error"
-      : normalizedStatus === "running" || normalizedStatus === "retrying"
-        ? "warning"
-        : "info";
-
-  const serviceToken = row.toolName.split(".")[0]?.toLowerCase() || "system";
-  const service = serviceToken === "sheets" ? "google_sheets" : serviceToken;
-
-  return {
-    id: `step-${row.stepId}`,
-    timestamp: row.updatedAt,
-    level,
-    service,
-    action: "step_run",
-    message: `Step ${row.toolName} ${row.status}`,
-    workflowId: row.workflowId,
-    executionId: row.executionId,
-    details: {
-      stepId: row.stepId,
-      toolName: row.toolName,
-      retryCount: row.retryCount,
-      request: row.inputPayload,
-      response: row.outputPayload,
-      derivedFrom: "step_runs",
-    },
-  };
-}
-
 const statusConfig: Record<
   LogStatus,
   {
@@ -156,6 +111,7 @@ const statusConfig: Record<
 export default function LogsPage() {
   const [logs, setLogs] = useState<AuditLogEntry[]>([]);
   const [stats, setStats] = useState<LogStatsData | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -176,34 +132,23 @@ export default function LogsPage() {
         const mappedLogs = (logsResponse.data as unknown as ApiLogRow[]).map(
           mapLogRow,
         );
-
-        if (mappedLogs.length > 0) {
-          setLogs(mappedLogs);
-        } else {
-          const stepRunsResponse = await logsApi.listStepRuns({
-            limit: 500,
-            offset: 0,
-          });
-
-          if (
-            stepRunsResponse.success &&
-            Array.isArray(stepRunsResponse.data)
-          ) {
-            const mappedFromStepRuns = (
-              stepRunsResponse.data as unknown as ApiStepRunRow[]
-            )
-              .map(mapStepRunRowToLogRow)
-              .map(mapLogRow);
-
-            setLogs(mappedFromStepRuns);
-          } else {
-            setLogs([]);
-          }
-        }
+        setLogs(mappedLogs);
+        setLoadError(null);
+      } else {
+        setLogs([]);
+        setLoadError(
+          logsResponse.error ||
+            "Unable to load PostgreSQL event_logs for Audit Logs.",
+        );
       }
 
       if (statsResponse.success && statsResponse.data) {
         setStats(statsResponse.data as unknown as LogStatsData);
+      } else if (!loadError) {
+        setLoadError(
+          statsResponse.error ||
+            "Unable to load PostgreSQL event_logs statistics.",
+        );
       }
     } finally {
       setIsRefreshing(false);
@@ -343,6 +288,9 @@ export default function LogsPage() {
             Export
           </Button>
         </div>
+        {loadError ? (
+          <p className="mt-3 text-sm text-error">{loadError}</p>
+        ) : null}
       </Card>
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">

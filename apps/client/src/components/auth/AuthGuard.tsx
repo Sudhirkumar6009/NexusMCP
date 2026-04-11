@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Zap } from "lucide-react";
+import { authApi } from "@/lib/api";
 
 interface AuthGuardProps {
   children: React.ReactNode;
@@ -23,15 +24,9 @@ export function AuthGuard({ children }: AuthGuardProps) {
       }
 
       try {
-        const apiUrl =
-          process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000";
-        const response = await fetch(`${apiUrl}/api/auth/me`, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        });
+        const response = await authApi.me();
 
-        if (response.ok) {
+        if (response.success) {
           setIsAuthenticated(true);
         } else {
           // Token is invalid, remove it and redirect

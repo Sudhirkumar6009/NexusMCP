@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { getInitials } from "@/lib/utils";
+import { authApi } from "@/lib/api";
 import { User, Shield, Key, Save, CheckCircle2, Pencil } from "lucide-react";
 
 export default function ProfilePage() {
@@ -59,23 +60,11 @@ export default function ProfilePage() {
     setProfileError(null);
     setProfileMessage(null);
 
-    const token =
-      typeof window !== "undefined" ? localStorage.getItem("auth_token") : null;
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000";
-
     try {
-      const response = await fetch(`${apiUrl}/api/auth/me`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        credentials: "include",
-        body: JSON.stringify({ name: editableName.trim() }),
+      const payload = await authApi.updateProfile({
+        name: editableName.trim(),
       });
-
-      const payload = await response.json();
-      if (!response.ok || !payload?.success) {
+      if (!payload?.success) {
         throw new Error(payload?.error || "Failed to update profile");
       }
 
@@ -130,23 +119,12 @@ export default function ProfilePage() {
     setIsUpdatingPassword(true);
 
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000";
-      const response = await fetch(`${apiUrl}/api/auth/change-password`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        credentials: "include",
-        body: JSON.stringify({
-          currentPassword,
-          newPassword,
-        }),
-      });
+      const payload = await authApi.changePassword(
+        currentPassword,
+        newPassword,
+      );
 
-      const payload = await response.json();
-
-      if (!response.ok || !payload?.success) {
+      if (!payload?.success) {
         setPasswordError(payload?.error || "Failed to update password.");
         return;
       }
