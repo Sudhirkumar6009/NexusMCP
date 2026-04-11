@@ -4,6 +4,7 @@ import React from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
+import { useAuth } from '@/context/auth-context';
 import {
   LayoutDashboard,
   Plug,
@@ -31,6 +32,15 @@ const navItems: NavItem[] = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const { user } = useAuth();
+  const userName = user?.name || 'User';
+  const userEmail = user?.email || '';
+  const userInitials = userName
+    .split(' ')
+    .map((part) => part[0])
+    .join('')
+    .toUpperCase()
+    .slice(0, 2);
 
   return (
     <aside className="fixed left-0 top-0 z-40 h-screen w-64 border-r border-border bg-surface-primary">
@@ -70,11 +80,11 @@ export function Sidebar() {
       <div className="absolute bottom-0 left-0 right-0 border-t border-border p-4">
         <div className="flex items-center gap-3 rounded-lg bg-surface-secondary px-3 py-2.5">
           <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-white text-sm font-medium">
-            AU
+            {userInitials}
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-content-primary truncate">Admin User</p>
-            <p className="text-xs text-content-tertiary truncate">admin@nexusmcp.io</p>
+            <p className="text-sm font-medium text-content-primary truncate">{userName}</p>
+            <p className="text-xs text-content-tertiary truncate">{userEmail}</p>
           </div>
         </div>
       </div>

@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAuth } from '@/context/auth-context';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -17,13 +17,73 @@ import {
   Trash2,
   LogOut,
   Save,
+  Pencil,
   CheckCircle2,
 } from 'lucide-react';
 
 export default function ProfilePage() {
-  const { user, sessions, updateUser, updateRole, updatePermissions, terminateSession } = useAuth();
+  const { user, sessions, updateUser, updateRole, updatePermissions, terminateSession, refreshUser } = useAuth();
+  const [editableName, setEditableName] = useState('');
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [profileMessage, setProfileMessage] = useState<string | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (user && !isEditingName) {
+      setEditableName(user.name);
+    }
+  }, [user?.name, isEditingName]);
 
   if (!user) return null;
+
+  const hasNameChanged = editableName.trim().length > 0 && editableName.trim() !== user.name;
+
+  const handleStartEditingName = () => {
+    setProfileError(null);
+    setProfileMessage(null);
+    setEditableName(user.name);
+    setIsEditingName(true);
+  };
+
+  const handleSaveProfile = async () => {
+    if (!isEditingName || !hasNameChanged) return;
+
+    setIsSavingProfile(true);
+    setProfileError(null);
+    setProfileMessage(null);
+
+    const token = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null;
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+
+    try {
+      const response = await fetch(`${apiUrl}/api/auth/me`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        credentials: 'include',
+        body: JSON.stringify({ name: editableName.trim() }),
+      });
+
+      const payload = await response.json();
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.error || 'Failed to update profile');
+      }
+
+      const nextName = payload?.data?.name || editableName.trim();
+      updateUser({ name: nextName });
+      setEditableName(nextName);
+      await refreshUser();
+      setIsEditingName(false);
+      setProfileMessage('Profile updated successfully.');
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : 'Failed to update profile');
+    } finally {
+      setIsSavingProfile(false);
+    }
+  };
 
   const roleOptions = [
     { value: 'admin', label: 'Admin - Full access' },
@@ -49,16 +109,35 @@ export default function ProfilePage() {
             </div>
             <div className="flex-1 space-y-4">
               <div className="grid grid-cols-2 gap-4">
-                <Input
-                  label="Name"
-                  value={user.name}
-                  onChange={(e) => updateUser({ name: e.target.value })}
-                />
+                <div>
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <label className="block text-sm font-medium text-content-primary">Name</label>
+                    {!isEditingName && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleStartEditingName}
+                        className="h-7 px-2"
+                        aria-label="Edit name"
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                    )}
+                  </div>
+                  <Input
+                    value={editableName}
+                    onChange={(e) => setEditableName(e.target.value)}
+                    readOnly={!isEditingName}
+                    hint={isEditingName ? 'Update your display name and click Save' : undefined}
+                  />
+                </div>
                 <Input
                   label="Email"
                   type="email"
                   value={user.email}
-                  onChange={(e) => updateUser({ email: e.target.value })}
+                  readOnly
+                  hint="Email cannot be changed"
                 />
               </div>
             </div>
@@ -79,7 +158,19 @@ export default function ProfilePage() {
           </div>
         </CardContent>
         <CardFooter>
-          <Button leftIcon={<Save className="h-4 w-4" />}>Save Changes</Button>
+          <div className="flex items-center gap-4">
+            {isEditingName && (
+              <Button
+                leftIcon={<Save className="h-4 w-4" />}
+                onClick={handleSaveProfile}
+                disabled={!hasNameChanged || isSavingProfile}
+              >
+                {isSavingProfile ? 'Saving...' : 'Save Changes'}
+              </Button>
+            )}
+            {profileMessage && <p className="text-sm text-success">{profileMessage}</p>}
+            {profileError && <p className="text-sm text-error">{profileError}</p>}
+          </div>
         </CardFooter>
       </Card>
 

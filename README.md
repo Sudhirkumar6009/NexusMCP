@@ -44,7 +44,9 @@ Add your demo video URL here:
 Preview links (Preview of System):
 
 ![Screenshot 1](apps/client/public/1.png)
+
 ![Screenshot 2](apps/client/public/2.png)
+
 ![Screenshot 3](apps/client/public/3.png)
 
 > Note: absolute local paths work for local viewing, but not on GitHub for other users. For shared docs, move images into the repo (for example `docs/images/`) and reference relative paths.
