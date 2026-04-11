@@ -77,7 +77,9 @@ async function safeEnsureExecutionRecords(args: {
       description: args.prompt || "",
       nodes: [],
       edges: [],
+      status: "draft",
       createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     });
 
     await saveWorkflowExecution({
@@ -169,6 +171,7 @@ router.post("/execute", async (req, res) => {
       ? `MCP method ${mcpRequest.method} failed`
       : `MCP method ${mcpRequest.method} executed`,
     executionId,
+    workflowId,
     details: {
       requestId: mcpRequest.id,
       method: mcpRequest.method,
@@ -269,6 +272,7 @@ router.post("/execute-node", async (req, res) => {
       ? `Node ${node.id} failed`
       : `Node ${node.id} executed`,
     executionId,
+    workflowId,
     nodeId: node.id,
     details: {
       operation: node.operation,
@@ -353,10 +357,37 @@ router.post("/stream", async (req, res) => {
     });
   }
 
+  dataStore.addLog({
+    level: "info",
+    service: "system",
+    action: "workflow_stream_run_started",
+    message: `Workflow "${workflow.name}" stream execution started`,
+    workflowId,
+    executionId: execution.id,
+    details: {
+      workflowName: workflow.name,
+      nodes: workflow.nodes.length,
+    },
+  });
+
   // Execute nodes in order (simplified - real implementation would handle DAG topology)
   const results: Record<string, unknown> = {};
 
   for (const node of workflow.nodes) {
+    dataStore.addLog({
+      level: "info",
+      service: node.service,
+      action: "workflow_node_started",
+      message: `Node ${node.id} (${node.operation}) started`,
+      workflowId,
+      executionId: execution.id,
+      nodeId: node.id,
+      details: {
+        operation: node.operation,
+        label: node.label,
+      },
+    });
+
     // Update node status to running
     dataStore.updateExecution(execution.id, {
       currentNodeId: node.id,
@@ -373,6 +404,23 @@ router.post("/stream", async (req, res) => {
     // Execute the node
     const result = await executeNode(node);
     results[node.id] = result;
+
+    dataStore.addLog({
+      level: result.error ? "error" : "info",
+      service: node.service,
+      action: result.error ? "workflow_node_failed" : "workflow_node_completed",
+      message: result.error
+        ? `Node ${node.id} failed: ${result.error}`
+        : `Node ${node.id} completed`,
+      workflowId,
+      executionId: execution.id,
+      nodeId: node.id,
+      details: {
+        operation: node.operation,
+        result: result.result,
+        error: result.error,
+      },
+    });
 
     // Update node status to completed or failed
     dataStore.updateExecution(execution.id, {
@@ -398,6 +446,20 @@ router.post("/stream", async (req, res) => {
 
       dataStore.updateWorkflow(workflowId, { status: "failed" });
 
+      dataStore.addLog({
+        level: "error",
+        service: "system",
+        action: "workflow_stream_run_failed",
+        message: `Workflow "${workflow.name}" failed on node ${node.id}`,
+        workflowId,
+        executionId: execution.id,
+        nodeId: node.id,
+        details: {
+          operation: node.operation,
+          error: result.error,
+        },
+      });
+
       return res.json({
         success: false,
         data: {
@@ -417,6 +479,18 @@ router.post("/stream", async (req, res) => {
   });
 
   dataStore.updateWorkflow(workflowId, { status: "completed" });
+
+  dataStore.addLog({
+    level: "info",
+    service: "system",
+    action: "workflow_stream_run_completed",
+    message: `Workflow "${workflow.name}" stream execution completed`,
+    workflowId,
+    executionId: execution.id,
+    details: {
+      nodesExecuted: workflow.nodes.length,
+    },
+  });
 
   res.json({
     success: true,

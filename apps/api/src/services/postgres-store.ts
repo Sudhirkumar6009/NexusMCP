@@ -17,6 +17,7 @@ type Json =
 type LogFilters = {
   level?: AuditLog["level"];
   service?: AuditLog["service"];
+  workflowId?: string;
   search?: string;
   limit?: number;
   offset?: number;
@@ -31,8 +32,12 @@ const schemaStatements = [
       name TEXT NOT NULL,
       natural_language_input TEXT NOT NULL,
       generated_dag JSONB NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );`,
+  `ALTER TABLE workflow_definitions ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'draft';`,
+  `ALTER TABLE workflow_definitions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`,
   `CREATE TABLE IF NOT EXISTS workflow_executions (
       execution_id TEXT PRIMARY KEY,
       workflow_id TEXT NOT NULL REFERENCES workflow_definitions(workflow_id) ON DELETE CASCADE,
@@ -156,7 +161,14 @@ export async function initPostgresStore(): Promise<boolean> {
 export async function saveWorkflowDefinition(
   workflow: Pick<
     Workflow,
-    "id" | "name" | "description" | "nodes" | "edges" | "createdAt"
+    | "id"
+    | "name"
+    | "description"
+    | "nodes"
+    | "edges"
+    | "status"
+    | "createdAt"
+    | "updatedAt"
   >,
 ): Promise<void> {
   if (!postgresReady) return;
@@ -164,24 +176,113 @@ export async function saveWorkflowDefinition(
   const dag = {
     nodes: workflow.nodes,
     edges: workflow.edges,
+    status: workflow.status,
   };
 
   await query(
-    `INSERT INTO workflow_definitions (workflow_id, name, natural_language_input, generated_dag, created_at)
-     VALUES ($1, $2, $3, $4::jsonb, $5::timestamptz)
+    `INSERT INTO workflow_definitions (workflow_id, name, natural_language_input, generated_dag, status, updated_at, created_at)
+     VALUES ($1, $2, $3, $4::jsonb, $5, $6::timestamptz, $7::timestamptz)
      ON CONFLICT (workflow_id)
      DO UPDATE SET
        name = EXCLUDED.name,
        natural_language_input = EXCLUDED.natural_language_input,
-       generated_dag = EXCLUDED.generated_dag`,
+       generated_dag = EXCLUDED.generated_dag,
+       status = EXCLUDED.status,
+       updated_at = EXCLUDED.updated_at`,
     [
       workflow.id,
       workflow.name,
       workflow.description || "",
       JSON.stringify(dag),
+      workflow.status,
+      workflow.updatedAt,
       workflow.createdAt,
     ],
   );
+}
+
+function parseWorkflowRow(row: Record<string, unknown>): Workflow {
+  const dagRaw =
+    row.generated_dag && typeof row.generated_dag === "object"
+      ? (row.generated_dag as Record<string, unknown>)
+      : {};
+
+  const nodes = Array.isArray(dagRaw.nodes) ? dagRaw.nodes : [];
+  const edges = Array.isArray(dagRaw.edges) ? dagRaw.edges : [];
+
+  const statusRaw =
+    typeof row.status === "string" && row.status.trim().length > 0
+      ? row.status.trim()
+      : typeof dagRaw.status === "string"
+        ? dagRaw.status.trim()
+        : "draft";
+
+  const status: Workflow["status"] =
+    statusRaw === "draft" ||
+    statusRaw === "ready" ||
+    statusRaw === "running" ||
+    statusRaw === "completed" ||
+    statusRaw === "failed" ||
+    statusRaw === "paused"
+      ? statusRaw
+      : "draft";
+
+  return {
+    id: String(row.workflow_id || ""),
+    name: String(row.name || "Untitled Workflow"),
+    description: String(row.natural_language_input || ""),
+    nodes: nodes as Workflow["nodes"],
+    edges: edges as Workflow["edges"],
+    status,
+    createdAt: new Date(String(row.created_at || new Date().toISOString())).toISOString(),
+    updatedAt: new Date(
+      String(row.updated_at || row.created_at || new Date().toISOString()),
+    ).toISOString(),
+    executionHistory: [],
+  };
+}
+
+export async function listWorkflowDefinitions(): Promise<Workflow[]> {
+  if (!postgresReady) return [];
+
+  const result = await query(
+    `SELECT workflow_id, name, natural_language_input, generated_dag, status, updated_at, created_at
+     FROM workflow_definitions
+     ORDER BY updated_at DESC, created_at DESC`,
+  );
+
+  return result.rows.map((row) => parseWorkflowRow(row as Record<string, unknown>));
+}
+
+export async function getWorkflowDefinition(
+  workflowId: string,
+): Promise<Workflow | null> {
+  if (!postgresReady) return null;
+
+  const result = await query(
+    `SELECT workflow_id, name, natural_language_input, generated_dag, status, updated_at, created_at
+     FROM workflow_definitions
+     WHERE workflow_id = $1
+     LIMIT 1`,
+    [workflowId],
+  );
+
+  if (result.rows.length === 0) {
+    return null;
+  }
+
+  return parseWorkflowRow(result.rows[0] as Record<string, unknown>);
+}
+
+export async function deleteWorkflowDefinition(workflowId: string): Promise<boolean> {
+  if (!postgresReady) return false;
+
+  const result = await query(
+    `DELETE FROM workflow_definitions WHERE workflow_id = $1`,
+    [workflowId],
+  );
+
+  return (result.rowCount ?? 0) > 0;
 }
 
 export async function saveWorkflowExecution(
@@ -340,6 +441,13 @@ export async function getEventLogs(
   if (filters?.service) {
     params.push(filters.service);
     where.push(`service = $${params.length}`);
+  }
+
+  if (filters?.workflowId) {
+    params.push(filters.workflowId);
+    where.push(
+      `(workflow_id = $${params.length} OR execution_id IN (SELECT execution_id FROM workflow_executions WHERE workflow_id = $${params.length}))`,
+    );
   }
 
   if (filters?.search) {

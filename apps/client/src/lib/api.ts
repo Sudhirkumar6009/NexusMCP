@@ -115,6 +115,15 @@ export const workflowsApi = {
   stop: (id: string) =>
     fetchApi<Workflow>(`/workflows/${id}/stop`, { method: "POST" }),
 
+  audits: (id: string, options?: { limit?: number; offset?: number }) => {
+    const params = new URLSearchParams();
+    if (options?.limit) params.set("limit", String(options.limit));
+    if (options?.offset) params.set("offset", String(options.offset));
+    const query = params.toString();
+
+    return fetchApi<WorkflowAuditsPayload>(`/workflows/${id}/audits${query ? `?${query}` : ""}`);
+  },
+
   generate: (prompt: string) =>
     fetchApi<Workflow>("/workflows/generate", {
       method: "POST",
@@ -418,6 +427,21 @@ interface AuditLog {
   workflowId?: string;
   nodeId?: string;
   userId?: string;
+  runNumber?: number;
+}
+
+interface WorkflowAuditRun {
+  runNumber: number;
+  executionId: string;
+  startedAt: string;
+  endedAt: string;
+  totalLogs: number;
+  errorCount: number;
+}
+
+interface WorkflowAuditsPayload {
+  logs: AuditLog[];
+  runs: WorkflowAuditRun[];
 }
 
 interface LogFilters {
@@ -520,6 +544,8 @@ export type {
   AuditLog,
   LogFilters,
   LogStats,
+  WorkflowAuditRun,
+  WorkflowAuditsPayload,
   User,
   Permission,
   Session,
