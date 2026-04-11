@@ -61,13 +61,6 @@ SERVICE_PATTERNS: Dict[str, List[str]] = {
         r"\binbox\b",
         r"\bsend\s*mail\b",
     ],
-    "aws": [
-        r"\baws\b",
-        r"\blambda\b",
-        r"\bs3\b",
-        r"\bec2\b",
-        r"\bcloud\b",
-    ],
 }
 
 SERVICE_ALIASES: Dict[str, List[str]] = {
@@ -76,7 +69,6 @@ SERVICE_ALIASES: Dict[str, List[str]] = {
     "slack": ["slack"],
     "google_sheets": ["google sheets", "google_sheets", "sheets", "sheet"],
     "gmail": ["gmail", "google mail", "email", "mail"],
-    "aws": ["aws", "amazon web services"],
 }
 
 EXCLUSION_TERMS = ("skip", "exclude", "except", "without", "omit", "ignore")
@@ -104,7 +96,7 @@ Return JSON with this exact schema:
 {
   "required_services": [
     {
-      "service_id": "string (jira|github|slack|google_sheets|gmail|aws)",
+            "service_id": "string (jira|github|slack|google_sheets|gmail)",
       "reason": "string (why this service is needed)",
       "actions": ["string (what actions are needed: get|create|update|delete|post|append)"],
       "priority": 1
@@ -369,9 +361,23 @@ class RequiredAPIAgent(BaseAgent):
             params["issue_key"] = issue_match.group(1)
         
         # Extract repository name
-        repo_match = re.search(r"\brepo(?:sitory)?\s+([a-zA-Z0-9._/-]+)\b", prompt, re.IGNORECASE)
-        if repo_match:
-            params["repo"] = repo_match.group(1)
+        repo_patterns = [
+            r"\brepo(?:sitory)?(?:\s+(?:is|as|named|name))?\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\b",
+            r"\bin\s+repo(?:sitory)?(?:\s+(?:is|as|named|name))?\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\b",
+            r"\bin\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\s+repo(?:sitory)?\b",
+        ]
+        invalid_repo_tokens = {"as", "is", "name", "named", "repo", "repository"}
+        for pattern in repo_patterns:
+            repo_match = re.search(pattern, prompt, re.IGNORECASE)
+            if not repo_match:
+                continue
+
+            repo_candidate = repo_match.group(1).strip()
+            if repo_candidate.lower() in invalid_repo_tokens:
+                continue
+
+            params["repo"] = repo_candidate
+            break
         
         # Extract branch name
         branch_match = re.search(r"\bbranch\s+([a-zA-Z0-9._/-]+)\b", prompt, re.IGNORECASE)
@@ -411,7 +417,6 @@ class RequiredAPIAgent(BaseAgent):
             "slack": f"To {action_str} Slack message/notification",
             "google_sheets": f"To {action_str} spreadsheet data",
             "gmail": f"To {action_str} email",
-            "aws": f"To {action_str} AWS resources",
         }
         
         return reasons.get(service_id, f"To {action_str} via {service_id}")

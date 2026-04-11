@@ -23,11 +23,14 @@ const CONNECTOR_KEYWORDS: Record<ServiceId, string[]> = {
   github: ["github", "pull request", "pr", "repository", "branch"],
   google_sheets: ["sheet", "sheets", "spreadsheet", "rows", "cells"],
   gmail: ["gmail", "email", "mail", "inbox"],
-  aws: ["aws", "cloud", "lambda", "stack", "infrastructure"],
 };
 
 const ALL_CONNECTORS_REGEX =
   /all\s+(the\s+)?(connectors|integrations|services)|every\s+connector/i;
+const READINESS_INTENT_REGEX =
+  /\b(report|check|show|verify|confirm)\s+(the\s+)?(connection\s+)?(readiness|status)\b|\breadiness\b|\bconnection\s+status\b/i;
+const ACTION_INTENT_REGEX =
+  /\b(create|update|delete|send|post|comment|append|write|search|query|transition|merge|run|execute)\b/i;
 // Removed CONTEXT_FAILURE_REGEX - was causing false failures in production
 const EXCLUSION_HINT_REGEX = /(skip|exclude|except|without|omit|ignore)/i;
 
@@ -37,7 +40,6 @@ const CONNECTOR_ALIASES: Record<ServiceId, string[]> = {
   github: ["github"],
   google_sheets: ["google sheets", "google_sheets", "sheets"],
   gmail: ["gmail", "google mail"],
-  aws: ["aws", "amazon web services"],
 };
 
 type FlowGraph = {
@@ -64,7 +66,6 @@ const SERVICE_IDS: ServiceId[] = [
   "github",
   "google_sheets",
   "gmail",
-  "aws",
 ];
 
 const SERVICE_TOKEN_TO_ID: Record<string, ServiceId> = {
@@ -79,7 +80,6 @@ const SERVICE_TOKEN_TO_ID: Record<string, ServiceId> = {
   google_mail: "gmail",
   googlemail: "gmail",
   mail: "gmail",
-  aws: "aws",
 };
 
 function normalizeServiceToken(value: string): string {
@@ -331,18 +331,30 @@ function chooseTargetServices(
     return targeted;
   }
 
-  const connected = withoutExcluded(
-    integrations
-      .filter((integration) => integration.status === "connected")
-      .map((integration) => integration.id),
-  );
-
-  if (connected.length > 0) {
-    return connected;
-  }
-
   // Do not add arbitrary connectors when prompt does not imply any.
   return [];
+}
+
+function isReadinessOnlyPrompt(prompt: string): boolean {
+  const normalized = normalizedPrompt(prompt);
+  const mentionsAllConnectors = ALL_CONNECTORS_REGEX.test(normalized);
+
+  if (!mentionsAllConnectors) {
+    return false;
+  }
+
+  if (!READINESS_INTENT_REGEX.test(normalized)) {
+    return false;
+  }
+
+  return !ACTION_INTENT_REGEX.test(normalized);
+}
+
+export function getTargetServiceIds(
+  prompt: string,
+  integrations: Integration[],
+): ServiceId[] {
+  return chooseTargetServices(prompt, integrations);
 }
 
 function connectorUnavailableReason(integration?: Integration): string | null {
@@ -986,6 +998,9 @@ export async function executeAgentFlow(args: {
   }
 
   const executionSteps = toExecutionSteps(args.plan);
+  const readinessOnlyPrompt = isReadinessOnlyPrompt(args.prompt);
+  const flowExecutionId = `exec-${args.plan.id}`;
+  const workflowId = args.plan.id;
   const readyConnectorSteps = new Map<
     ServiceId,
     { integration: Integration; nodeId: string }
@@ -1163,7 +1178,7 @@ export async function executeAgentFlow(args: {
     connectorSteps.every((step) => failedConnectorNodeIds.has(step.id));
 
   if (hasReadyConnectors) {
-    if (executionSteps.length === 0) {
+    if (executionSteps.length === 0 || readinessOnlyPrompt) {
       for (const connectorState of Array.from(readyConnectorSteps.values())) {
         if (failedConnectorNodeIds.has(connectorState.nodeId)) {
           continue;
@@ -1172,11 +1187,14 @@ export async function executeAgentFlow(args: {
         args.onStatusUpdate({
           nodeId: connectorState.nodeId,
           status: "done",
-          detail: `${connectorState.integration.name} is connected and ready`,
+          detail: readinessOnlyPrompt
+            ? `${connectorState.integration.name} readiness confirmed`
+            : `${connectorState.integration.name} is connected and ready`,
         });
       }
     } else {
       const executionCount = new Map<ServiceId, number>();
+      let executionFailureDetail: string | null = null;
 
       for (const executionStep of executionSteps) {
         if (isAbort(args.signal)) {
@@ -1185,33 +1203,36 @@ export async function executeAgentFlow(args: {
 
         const serviceId = toServiceIdFromTool(executionStep.tool);
         if (!serviceId) {
-          // Log error but continue with other steps if possible
+          executionFailureDetail =
+            executionFailureDetail ||
+            `Unable to resolve connector from tool ${executionStep.tool}`;
+
           emitToolAudit(args.onToolAudit, {
             nodeId: connectorSteps[0]?.id ?? "unknown-node",
             serviceId: "unknown-service",
             tool: executionStep.tool,
             stage: "error",
             request: executionStep.arguments,
-            error: `Unable to resolve connector from tool ${executionStep.tool}`,
+            error: executionFailureDetail,
           });
-
-          // Only mark as failed if this is a critical tool
-          continue;
+          break;
         }
 
         const connectorState = readyConnectorSteps.get(serviceId);
         if (!connectorState) {
-          // Connector not ready - skip this step but continue with others
+          executionFailureDetail =
+            executionFailureDetail ||
+            `Connector ${serviceId} is not connected for tool execution`;
+
           emitToolAudit(args.onToolAudit, {
             nodeId: connectorSteps[0]?.id ?? "unknown-node",
             serviceId,
             tool: executionStep.tool,
             stage: "error",
             request: executionStep.arguments,
-            error: `Connector ${serviceId} is not connected for tool execution`,
+            error: executionFailureDetail,
           });
-
-          continue;
+          break;
         }
 
         args.onStatusUpdate({
@@ -1223,6 +1244,11 @@ export async function executeAgentFlow(args: {
         const toolRequest = {
           ...executionStep.arguments,
           prompt: args.prompt,
+          executionId: flowExecutionId,
+          execution_id: flowExecutionId,
+          workflowId,
+          workflow_id: workflowId,
+          workflowName: "Agentic Flow Runtime",
         };
 
         emitToolAudit(args.onToolAudit, {
@@ -1243,13 +1269,14 @@ export async function executeAgentFlow(args: {
           !executionResponse.data ||
           executionResponse.data.error
         ) {
-          // Track execution failure but continue with other tools if possible
+          // Fail-fast: stop at first tool error to keep workflow deterministic.
           failedConnectorNodeIds.add(connectorState.nodeId);
 
           const failureDetail =
             executionResponse.error ||
             executionResponse.data?.error?.message ||
             `Execution failed for ${executionStep.tool}`;
+          executionFailureDetail = executionFailureDetail || failureDetail;
 
           emitToolAudit(args.onToolAudit, {
             nodeId: connectorState.nodeId,
@@ -1267,8 +1294,7 @@ export async function executeAgentFlow(args: {
             detail: failureDetail,
           });
 
-          // Continue with other execution steps instead of breaking
-          continue;
+          break;
         }
 
         executionCount.set(serviceId, (executionCount.get(serviceId) ?? 0) + 1);
@@ -1287,6 +1313,20 @@ export async function executeAgentFlow(args: {
           status: "working",
           detail: `Executed ${executionStep.tool}`,
         });
+      }
+
+      if (executionFailureDetail) {
+        args.onStatusUpdate({
+          nodeId: orchestratorStep.id,
+          status: "failed",
+          detail: executionFailureDetail,
+        });
+        args.onStatusUpdate({
+          nodeId: endStep.id,
+          status: "failed",
+          detail: "Flow terminated after connector/tool execution error",
+        });
+        return "failed";
       }
 
       for (const [serviceId, connectorState] of Array.from(

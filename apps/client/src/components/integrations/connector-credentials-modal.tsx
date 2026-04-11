@@ -1,10 +1,11 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Modal, ModalFooter } from "@/components/ui/modal";
 import { Input } from "@/components/ui/input";
-import { authApi } from "@/lib/api";
+import { Select } from "@/components/ui/select";
+import { authApi, integrationsApi } from "@/lib/api";
 import type {
   Integration,
   IntegrationCredentials,
@@ -34,8 +35,8 @@ const availableScopes: Record<ServiceId, string[]> = {
   gmail: [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.compose",
   ],
-  aws: ["sts:GetCallerIdentity", "lambda:InvokeFunction", "s3:ListBucket"],
 };
 
 export function ConnectorCredentialsModal({
@@ -52,20 +53,31 @@ export function ConnectorCredentialsModal({
   const [googleServiceAccountJson, setGoogleServiceAccountJson] = useState("");
   const [googleCredentialsFileName, setGoogleCredentialsFileName] =
     useState("");
-  const [awsAccessKeyId, setAwsAccessKeyId] = useState("");
-  const [awsSecretAccessKey, setAwsSecretAccessKey] = useState("");
-  const [awsSessionToken, setAwsSessionToken] = useState("");
-  const [awsRegion, setAwsRegion] = useState("us-east-1");
   const [submitError, setSubmitError] = useState("");
   const [scopes, setScopes] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isFetchingGmailToken, setIsFetchingGmailToken] = useState(false);
+  const [credentialSource, setCredentialSource] = useState<"env" | "manual">(
+    "manual",
+  );
+  const [envCredentials, setEnvCredentials] = useState<
+    Partial<Record<ServiceId, Partial<IntegrationCredentials>>>
+  >({});
+  const [isLoadingEnv, setIsLoadingEnv] = useState(false);
+  const [hasAppliedEnv, setHasAppliedEnv] = useState(false);
 
   const isJira = integration?.id === "jira";
   const isGitHub = integration?.id === "github";
   const isGoogleSheets = integration?.id === "google_sheets";
   const isGmail = integration?.id === "gmail";
-  const isAws = integration?.id === "aws";
+  const showAccessTokenInput =
+    !isGoogleSheets && (!isGmail || credentialSource === "manual");
+
+  const envForIntegration = integration
+    ? envCredentials[integration.id]
+    : undefined;
+  const hasEnvValues =
+    !!envForIntegration && Object.keys(envForIntegration).length > 0;
 
   const gmailOAuthUrl = `${(
     process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000/api"
@@ -118,14 +130,96 @@ export function ConnectorCredentialsModal({
     setSpreadsheetId("");
     setGoogleServiceAccountJson("");
     setGoogleCredentialsFileName("");
-    setAwsAccessKeyId("");
-    setAwsSecretAccessKey("");
-    setAwsSessionToken("");
-    setAwsRegion("us-east-1");
     setScopes([]);
     setSubmitError("");
     setIsFetchingGmailToken(false);
+    setCredentialSource("manual");
+    setHasAppliedEnv(false);
   };
+
+  const applyEnvCredentials = useCallback(
+    (serviceId: ServiceId, creds: Partial<IntegrationCredentials>) => {
+      if (serviceId === "jira") {
+        if (creds.apiKey) setApiKey(creds.apiKey);
+        if (creds.username) setJiraEmail(creds.username);
+        if (creds.baseUrl) setJiraBaseUrl(creds.baseUrl);
+        return;
+      }
+
+      if (serviceId === "github") {
+        if (creds.accessToken) setApiKey(creds.accessToken);
+        if (creds.baseUrl) setGithubBaseUrl(creds.baseUrl);
+        return;
+      }
+
+      if (serviceId === "slack") {
+        if (creds.accessToken) setApiKey(creds.accessToken);
+        return;
+      }
+
+      if (serviceId === "google_sheets") {
+        if (creds.googleServiceAccountJson) {
+          setGoogleServiceAccountJson(creds.googleServiceAccountJson);
+          setGoogleCredentialsFileName("env:service-account.json");
+        }
+        if (creds.spreadsheetId) setSpreadsheetId(creds.spreadsheetId);
+        return;
+      }
+
+      if (serviceId === "gmail") {
+        if (creds.accessToken) setApiKey(creds.accessToken);
+        return;
+      }
+
+      if (creds.accessToken) {
+        setApiKey(creds.accessToken);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!isOpen || !integration) return;
+
+    setHasAppliedEnv(false);
+    setIsLoadingEnv(true);
+
+    const loadEnvCredentials = async () => {
+      try {
+        const response = await integrationsApi.getEnvCredentials();
+        if (response.success && response.data) {
+          setEnvCredentials(
+            response.data as Partial<
+              Record<ServiceId, Partial<IntegrationCredentials>>
+            >,
+          );
+        }
+      } finally {
+        setIsLoadingEnv(false);
+      }
+    };
+
+    void loadEnvCredentials();
+  }, [integration, isOpen]);
+
+  useEffect(() => {
+    if (!isOpen || !integration || hasAppliedEnv) return;
+
+    if (envForIntegration && Object.keys(envForIntegration).length > 0) {
+      applyEnvCredentials(integration.id, envForIntegration);
+      setCredentialSource("env");
+    } else {
+      setCredentialSource("manual");
+    }
+
+    setHasAppliedEnv(true);
+  }, [
+    applyEnvCredentials,
+    envForIntegration,
+    hasAppliedEnv,
+    integration,
+    isOpen,
+  ]);
 
   const handleClose = () => {
     if (isLoading || isFetchingGmailToken) {
@@ -189,11 +283,6 @@ export function ConnectorCredentialsModal({
         credentials.spreadsheetId = spreadsheetId;
       } else if (isGmail) {
         credentials.accessToken = apiKey;
-      } else if (isAws) {
-        credentials.accessKeyId = awsAccessKeyId;
-        credentials.secretAccessKey = awsSecretAccessKey;
-        credentials.sessionToken = awsSessionToken || undefined;
-        credentials.region = awsRegion;
       } else {
         credentials.accessToken = apiKey;
       }
@@ -212,13 +301,26 @@ export function ConnectorCredentialsModal({
     }
   };
 
+  const handleCredentialSourceChange = (value: string) => {
+    const nextSource = value === "env" ? "env" : "manual";
+    setCredentialSource(nextSource);
+
+    if (
+      nextSource === "env" &&
+      integration &&
+      envForIntegration &&
+      Object.keys(envForIntegration).length > 0
+    ) {
+      applyEnvCredentials(integration.id, envForIntegration);
+    }
+  };
+
   const isSaveDisabled =
     !integration ||
     (isJira && (!apiKey || !jiraEmail || !jiraBaseUrl)) ||
     (isGoogleSheets && (!googleServiceAccountJson || !spreadsheetId)) ||
     (integration?.id === "slack" && !apiKey) ||
     (integration?.id === "github" && !apiKey) ||
-    (isAws && (!awsAccessKeyId || !awsSecretAccessKey || !awsRegion)) ||
     isFetchingGmailToken;
 
   return (
@@ -230,7 +332,7 @@ export function ConnectorCredentialsModal({
       size="md"
     >
       <div className="space-y-4">
-        {!isAws && !isGoogleSheets && !isGmail && (
+        {showAccessTokenInput && (
           <Input
             label={
               isJira
@@ -330,37 +432,6 @@ export function ConnectorCredentialsModal({
           />
         )}
 
-        {isAws && (
-          <>
-            <Input
-              label="AWS Access Key ID"
-              value={awsAccessKeyId}
-              onChange={(e) => setAwsAccessKeyId(e.target.value)}
-              placeholder="AKIA..."
-            />
-            <Input
-              label="AWS Secret Access Key"
-              type="password"
-              value={awsSecretAccessKey}
-              onChange={(e) => setAwsSecretAccessKey(e.target.value)}
-              placeholder="Enter secret access key"
-            />
-            <Input
-              label="AWS Session Token (optional)"
-              type="password"
-              value={awsSessionToken}
-              onChange={(e) => setAwsSessionToken(e.target.value)}
-              placeholder="Temporary credentials session token"
-            />
-            <Input
-              label="AWS Region"
-              value={awsRegion}
-              onChange={(e) => setAwsRegion(e.target.value)}
-              placeholder="us-east-1"
-            />
-          </>
-        )}
-
         {submitError && <p className="text-sm text-error">{submitError}</p>}
 
         <div>
@@ -393,6 +464,27 @@ export function ConnectorCredentialsModal({
               ))}
           </div>
         </div>
+
+        <Select
+          label="Credentials Source"
+          value={credentialSource}
+          onChange={handleCredentialSourceChange}
+          options={[
+            {
+              value: "env",
+              label: "Auto from services/.env",
+              disabled: !hasEnvValues,
+            },
+            { value: "manual", label: "Manual entry" },
+          ]}
+          hint={
+            isLoadingEnv
+              ? "Checking services/.env for available credentials."
+              : hasEnvValues
+                ? "Auto-filled values can be edited before saving."
+                : "No credentials found in services/.env."
+          }
+        />
       </div>
 
       <ModalFooter>

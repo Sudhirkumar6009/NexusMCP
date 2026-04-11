@@ -16,7 +16,6 @@ import {
   Github,
   Table2,
   Mail,
-  Cloud,
   Settings,
   Plug,
   PlugZap,
@@ -32,7 +31,6 @@ const serviceIcons: Record<
   github: Github,
   google_sheets: Table2,
   gmail: Mail,
-  aws: Cloud,
 };
 
 const categoryLabels: Record<string, string> = {
@@ -63,10 +61,6 @@ function CredentialModal({
   const [googleServiceAccountJson, setGoogleServiceAccountJson] = useState("");
   const [googleCredentialsFileName, setGoogleCredentialsFileName] =
     useState("");
-  const [awsAccessKeyId, setAwsAccessKeyId] = useState("");
-  const [awsSecretAccessKey, setAwsSecretAccessKey] = useState("");
-  const [awsSessionToken, setAwsSessionToken] = useState("");
-  const [awsRegion, setAwsRegion] = useState("us-east-1");
   const [submitError, setSubmitError] = useState("");
   const [scopes, setScopes] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -74,7 +68,6 @@ function CredentialModal({
   const isJira = integration?.id === "jira";
   const isGitHub = integration?.id === "github";
   const isGoogleSheets = integration?.id === "google_sheets";
-  const isAws = integration?.id === "aws";
 
   const handleGoogleCredentialsFile = async (
     event: React.ChangeEvent<HTMLInputElement>,
@@ -135,11 +128,6 @@ function CredentialModal({
         credentials.spreadsheetId = spreadsheetId;
       } else if (integration.id === "gmail") {
         credentials.accessToken = apiKey;
-      } else if (isAws) {
-        credentials.accessKeyId = awsAccessKeyId;
-        credentials.secretAccessKey = awsSecretAccessKey;
-        credentials.sessionToken = awsSessionToken || undefined;
-        credentials.region = awsRegion;
       } else {
         credentials.accessToken = apiKey;
       }
@@ -154,10 +142,6 @@ function CredentialModal({
       setSpreadsheetId("");
       setGoogleServiceAccountJson("");
       setGoogleCredentialsFileName("");
-      setAwsAccessKeyId("");
-      setAwsSecretAccessKey("");
-      setAwsSessionToken("");
-      setAwsRegion("us-east-1");
       setScopes([]);
     } catch (error) {
       setSubmitError(
@@ -187,7 +171,6 @@ function CredentialModal({
       "https://www.googleapis.com/auth/gmail.readonly",
       "https://www.googleapis.com/auth/gmail.send",
     ],
-    aws: ["sts:GetCallerIdentity", "lambda:InvokeFunction", "s3:ListBucket"],
   };
 
   const isSaveDisabled =
@@ -196,8 +179,7 @@ function CredentialModal({
     (isGoogleSheets && (!googleServiceAccountJson || !spreadsheetId)) ||
     (integration?.id === "gmail" && !apiKey) ||
     (integration?.id === "slack" && !apiKey) ||
-    (integration?.id === "github" && !apiKey) ||
-    (isAws && (!awsAccessKeyId || !awsSecretAccessKey || !awsRegion));
+    (integration?.id === "github" && !apiKey);
 
   return (
     <Modal
@@ -208,7 +190,7 @@ function CredentialModal({
       size="md"
     >
       <div className="space-y-4">
-        {!isAws && !isGoogleSheets && (
+        {!isGoogleSheets && (
           <Input
             label={
               isJira
@@ -283,37 +265,6 @@ function CredentialModal({
             onChange={(e) => setGithubBaseUrl(e.target.value)}
             placeholder="https://api.github.com or https://github.your-company.com/api/v3"
           />
-        )}
-
-        {isAws && (
-          <>
-            <Input
-              label="AWS Access Key ID"
-              value={awsAccessKeyId}
-              onChange={(e) => setAwsAccessKeyId(e.target.value)}
-              placeholder="AKIA..."
-            />
-            <Input
-              label="AWS Secret Access Key"
-              type="password"
-              value={awsSecretAccessKey}
-              onChange={(e) => setAwsSecretAccessKey(e.target.value)}
-              placeholder="Enter secret access key"
-            />
-            <Input
-              label="AWS Session Token (optional)"
-              type="password"
-              value={awsSessionToken}
-              onChange={(e) => setAwsSessionToken(e.target.value)}
-              placeholder="Temporary credentials session token"
-            />
-            <Input
-              label="AWS Region"
-              value={awsRegion}
-              onChange={(e) => setAwsRegion(e.target.value)}
-              placeholder="us-east-1"
-            />
-          </>
         )}
 
         {submitError && <p className="text-sm text-error">{submitError}</p>}

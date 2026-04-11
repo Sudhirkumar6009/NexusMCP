@@ -1,5 +1,8 @@
 import { Router } from "express";
-import { createHmac, createHash, createSign } from "crypto";
+import { createSign } from "crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { parse as parseDotEnv } from "dotenv";
 import { dataStore } from "../data/store.js";
 import { User, IUser } from "../models/User.js";
 
@@ -11,7 +14,6 @@ const integrationIdAliases: Record<string, string> = {
   github: "int-github",
   google_sheets: "int-google-sheets",
   gmail: "int-gmail",
-  aws: "int-aws",
 };
 
 function resolveIntegrationId(id: string): string {
@@ -34,6 +36,63 @@ function normalizeOptionalString(value: unknown): string | undefined {
 
   const trimmed = value.trim();
   return trimmed ? trimmed : undefined;
+}
+
+const envFileCandidates = [
+  resolve(process.cwd(), "services", ".env"),
+  resolve(process.cwd(), "services/.env"),
+  resolve(process.cwd(), "..", "services", ".env"),
+  resolve(__dirname, "../../../../services/.env"),
+];
+
+function loadServicesEnvFile(): Record<string, string> {
+  for (const envPath of envFileCandidates) {
+    if (!existsSync(envPath)) {
+      continue;
+    }
+
+    try {
+      const raw = readFileSync(envPath, "utf8");
+      return parseDotEnv(raw);
+    } catch {
+      return {};
+    }
+  }
+
+  return {};
+}
+
+function pickEnvValue(
+  envFile: Record<string, string>,
+  keys: string[],
+): string | undefined {
+  for (const key of keys) {
+    const envValue = normalizeOptionalString(process.env[key]);
+    if (envValue) {
+      return envValue;
+    }
+
+    const fileValue = normalizeOptionalString(envFile[key]);
+    if (fileValue) {
+      return fileValue;
+    }
+  }
+
+  return undefined;
+}
+
+function compactCredentials<T extends Record<string, unknown>>(
+  values: T,
+): Partial<T> {
+  const cleaned: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(values)) {
+    if (typeof value === "string" && value.trim()) {
+      cleaned[key] = value;
+    }
+  }
+
+  return cleaned as Partial<T>;
 }
 
 function parseExpiresInSeconds(value: unknown): number {
@@ -648,136 +707,6 @@ async function validateGmailCredentials(
   };
 }
 
-function hashSha256(content: string): string {
-  return createHash("sha256").update(content, "utf8").digest("hex");
-}
-
-function hmacSha256(
-  key: string | Buffer,
-  content: string,
-  encoding?: "hex",
-): Buffer | string {
-  const digest = createHmac("sha256", key).update(content, "utf8");
-  return encoding ? digest.digest(encoding) : digest.digest();
-}
-
-async function validateAwsCredentials(credentials: Record<string, unknown>) {
-  const accessKeyId =
-    (typeof credentials.accessKeyId === "string" &&
-      credentials.accessKeyId.trim()) ||
-    (typeof credentials.apiKey === "string" && credentials.apiKey.trim()) ||
-    process.env.AWS_ACCESS_KEY_ID;
-
-  const secretAccessKey =
-    (typeof credentials.secretAccessKey === "string" &&
-      credentials.secretAccessKey.trim()) ||
-    (typeof credentials.apiSecret === "string" &&
-      credentials.apiSecret.trim()) ||
-    process.env.AWS_SECRET_ACCESS_KEY;
-
-  const sessionToken =
-    (typeof credentials.sessionToken === "string" &&
-      credentials.sessionToken.trim()) ||
-    process.env.AWS_SESSION_TOKEN;
-
-  const region =
-    (typeof credentials.region === "string" && credentials.region.trim()) ||
-    process.env.AWS_REGION ||
-    "us-east-1";
-
-  if (!accessKeyId || !secretAccessKey) {
-    throw new Error("AWS accessKeyId and secretAccessKey are required");
-  }
-
-  const host = `sts.${region}.amazonaws.com`;
-  const endpoint = `https://${host}/`;
-  const service = "sts";
-  const payload = "Action=GetCallerIdentity&Version=2011-06-15";
-
-  const now = new Date();
-  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
-  const dateStamp = amzDate.slice(0, 8);
-
-  const canonicalHeaders = [
-    "content-type:application/x-www-form-urlencoded; charset=utf-8",
-    `host:${host}`,
-    `x-amz-date:${amzDate}`,
-    ...(sessionToken ? [`x-amz-security-token:${sessionToken}`] : []),
-  ]
-    .join("\n")
-    .concat("\n");
-
-  const signedHeaders = [
-    "content-type",
-    "host",
-    "x-amz-date",
-    ...(sessionToken ? ["x-amz-security-token"] : []),
-  ].join(";");
-
-  const canonicalRequest = [
-    "POST",
-    "/",
-    "",
-    canonicalHeaders,
-    signedHeaders,
-    hashSha256(payload),
-  ].join("\n");
-
-  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
-  const stringToSign = [
-    "AWS4-HMAC-SHA256",
-    amzDate,
-    credentialScope,
-    hashSha256(canonicalRequest),
-  ].join("\n");
-
-  const kDate = hmacSha256(`AWS4${secretAccessKey}`, dateStamp) as Buffer;
-  const kRegion = hmacSha256(kDate, region) as Buffer;
-  const kService = hmacSha256(kRegion, service) as Buffer;
-  const kSigning = hmacSha256(kService, "aws4_request") as Buffer;
-  const signature = hmacSha256(kSigning, stringToSign, "hex") as string;
-
-  const headers: Record<string, string> = {
-    "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
-    "X-Amz-Date": amzDate,
-    Authorization: `AWS4-HMAC-SHA256 Credential=${accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
-  };
-
-  if (sessionToken) {
-    headers["X-Amz-Security-Token"] = sessionToken;
-  }
-
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers,
-    body: payload,
-  });
-
-  const responseText = await response.text();
-  if (!response.ok) {
-    throw new Error(
-      `AWS validation failed (${response.status}): ${responseText}`,
-    );
-  }
-
-  const arnMatch = responseText.match(/<Arn>([^<]+)<\/Arn>/);
-  const accountMatch = responseText.match(/<Account>([^<]+)<\/Account>/);
-
-  return {
-    credentials: {
-      accessKeyId,
-      secretAccessKey,
-      ...(sessionToken ? { sessionToken } : {}),
-      region,
-    },
-    metadata: {
-      arn: arnMatch?.[1],
-      account: accountMatch?.[1],
-      region,
-    },
-  };
-}
-
 async function validateProvider(
   service: string,
   credentials: Record<string, unknown>,
@@ -816,12 +745,63 @@ async function validateProvider(
     return validateGmailCredentials(credentials, options?.userId);
   }
 
-  if (service === "aws") {
-    return validateAwsCredentials(credentials);
-  }
-
   throw new Error(`No validator configured for provider: ${service}`);
 }
+
+// GET /api/integrations/env-credentials - Read connector credentials from env
+router.get("/env-credentials", (_req, res) => {
+  const envFile = loadServicesEnvFile();
+
+  const jiraCredentials = compactCredentials({
+    apiKey: pickEnvValue(envFile, ["JIRA_API_TOKEN", "JIRA_TOKEN"]),
+    username: pickEnvValue(envFile, ["JIRA_EMAIL"]),
+    baseUrl: pickEnvValue(envFile, ["JIRA_BASE_URL", "JIRA_URL"]),
+  });
+
+  const slackCredentials = compactCredentials({
+    accessToken: pickEnvValue(envFile, [
+      "SLACK_BOT_TOKEN",
+      "SLACK_TOKEN",
+      "SLACK_ACCESS_TOKEN",
+      "SLACK_REFRESH_TOKEN",
+    ]),
+  });
+
+  const githubCredentials = compactCredentials({
+    accessToken: pickEnvValue(envFile, ["GITHUB_TOKEN"]),
+    baseUrl: pickEnvValue(envFile, ["GITHUB_API_URL"]),
+  });
+
+  const sheetsCredentials = compactCredentials({
+    googleServiceAccountJson: pickEnvValue(envFile, [
+      "GOOGLE_SERVICE_ACCOUNT_JSON",
+    ]),
+    spreadsheetId: pickEnvValue(envFile, [
+      "GOOGLE_SHEETS_SPREADSHEET_ID",
+      "SPREADSHEET_ID",
+    ]),
+    accessToken: pickEnvValue(envFile, ["GOOGLE_ACCESS_TOKEN"]),
+    apiKey: pickEnvValue(envFile, ["GOOGLE_SHEETS_API_KEY"]),
+  });
+
+  const gmailCredentials = compactCredentials({
+    accessToken: pickEnvValue(envFile, ["GMAIL_ACCESS_TOKEN"]),
+    refreshToken: pickEnvValue(envFile, ["GMAIL_REFRESH_TOKEN"]),
+  });
+
+  const envCredentials = {
+    jira: jiraCredentials,
+    slack: slackCredentials,
+    github: githubCredentials,
+    google_sheets: sheetsCredentials,
+    gmail: gmailCredentials,
+  };
+
+  res.json({
+    success: true,
+    data: envCredentials,
+  });
+});
 
 // GET /api/integrations - List all integrations
 router.get("/", (_req, res) => {

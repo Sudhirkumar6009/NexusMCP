@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class GmailOperation(BaseModel):
     """A Gmail operation to execute."""
 
-    operation: str  # send_email, read_emails, create_draft
+    operation: str  # send_email, read_email, search_emails, parse_email, add_label, get_thread, reply_email, get_attachments, listen_email_events
     arguments: Dict[str, Any] = Field(default_factory=dict)
     description: str = ""
     depends_on: List[str] = Field(default_factory=list)
@@ -37,8 +37,15 @@ class GmailAgent(BaseAgent):
 
     Supported Operations:
     1. send_email
-    2. read_emails
-    3. create_draft
+    2. read_email
+    3. search_emails
+    4. parse_email
+    5. add_label
+    6. get_thread
+    7. reply_email
+    8. get_attachments
+    9. listen_email_events
+    10. create_draft
     """
 
     name = "gmail-agent"
@@ -49,10 +56,21 @@ class GmailAgent(BaseAgent):
             "gmail_send_message",
             "gmail.send_email",
             "gmail_send_email",
+            "gmail.sendMessage",
             "gmail.send_mail",
             "gmail_send_mail",
         ],
-        "read_emails": [
+        "read_email": [
+            "gmail.read_email",
+            "gmail_read_email",
+            "gmail.readEmail",
+            "gmail.get_email",
+            "gmail_get_email",
+        ],
+        "search_emails": [
+            "gmail.search_emails",
+            "gmail_search_emails",
+            "gmail.searchEmails",
             "gmail.list_messages",
             "gmail_list_messages",
             "gmail.search_messages",
@@ -60,9 +78,47 @@ class GmailAgent(BaseAgent):
             "gmail.read_messages",
             "gmail_read_messages",
         ],
+        "read_emails": [
+            "gmail.search_emails",
+            "gmail_search_emails",
+            "gmail.searchEmails",
+            "gmail.list_messages",
+            "gmail_list_messages",
+        ],
+        "parse_email": [
+            "gmail.parse_email",
+            "gmail_parse_email",
+            "gmail.parseEmail",
+        ],
+        "add_label": [
+            "gmail.add_label",
+            "gmail_add_label",
+            "gmail.addLabel",
+        ],
+        "get_thread": [
+            "gmail.get_thread",
+            "gmail_get_thread",
+            "gmail.getThread",
+        ],
+        "reply_email": [
+            "gmail.reply_email",
+            "gmail_reply_email",
+            "gmail.replyEmail",
+        ],
+        "get_attachments": [
+            "gmail.get_attachments",
+            "gmail_get_attachments",
+            "gmail.getAttachments",
+        ],
+        "listen_email_events": [
+            "gmail.listen_email_events",
+            "gmail_listen_email_events",
+            "gmail.listenEmailEvents",
+        ],
         "create_draft": [
             "gmail.create_draft",
             "gmail_create_draft",
+            "gmail.createDraft",
             "gmail.draft_message",
             "gmail_draft_message",
         ],
@@ -124,11 +180,39 @@ GMAIL OPERATIONS:
    - Send an email
    - Arguments: to, subject, body
 
-2. read_emails
-   - Read/search/list emails
+2. read_email
+    - Read one email by ID
+    - Arguments: messageId
+
+3. search_emails
+    - Search/list emails
    - Arguments: query (optional), max_results (optional)
 
-3. create_draft
+4. parse_email
+    - Parse raw email/message to structured fields
+    - Arguments: messageId or message
+
+5. add_label
+    - Add/remove labels on message
+    - Arguments: messageId, addLabelIds/removeLabelIds
+
+6. get_thread
+    - Retrieve thread messages
+    - Arguments: threadId or messageId
+
+7. reply_email
+    - Reply in existing thread
+    - Arguments: threadId or messageId, body
+
+8. get_attachments
+    - List or download attachments
+    - Arguments: messageId, attachmentId (optional), download (optional)
+
+9. listen_email_events
+    - Poll mailbox changes
+    - Arguments: startHistoryId (optional)
+
+10. create_draft
    - Create a draft email
    - Arguments: to, subject, body
 
@@ -136,8 +220,10 @@ RULES:
 1. Extract recipient email addresses, subject, body, and query terms
 2. If prompt says draft/prepare, prefer create_draft
 3. If prompt says send email, use send_email
-4. If prompt says read/list/search/inbox, use read_emails
-5. Return ONLY valid JSON
+4. If prompt says read email by id, use read_email
+5. If prompt says list/search/inbox, use search_emails
+6. If prompt says parse email, use parse_email
+7. Return ONLY valid JSON
 
 OUTPUT FORMAT:
 {{
@@ -211,8 +297,16 @@ OUTPUT FORMAT:
         if query:
             extracted_params["query"] = query
 
+        message_id = self._extract_message_id(prompt)
+        if message_id:
+            extracted_params["messageId"] = message_id
+
+        thread_id = self._extract_thread_id(prompt)
+        if thread_id:
+            extracted_params["threadId"] = thread_id
+
         if context:
-            for key in ("to", "subject", "body", "query"):
+            for key in ("to", "subject", "body", "query", "messageId", "threadId"):
                 if key in context and key not in extracted_params and isinstance(context[key], str):
                     extracted_params[key] = context[key]
 
@@ -226,6 +320,16 @@ OUTPUT FORMAT:
             token in normalized
             for token in ["read", "list", "search", "inbox", "recent emails", "messages"]
         )
+        parse_requested = "parse" in normalized and "email" in normalized
+        label_requested = "label" in normalized or "processed" in normalized
+        thread_requested = "thread" in normalized or "conversation" in normalized
+        reply_requested = "reply" in normalized
+        attachment_requested = "attachment" in normalized
+        listen_requested = any(
+            token in normalized for token in ["listen", "watch", "webhook", "new email event"]
+        )
+
+        read_by_id_requested = read_requested and "messageId" in extracted_params
 
         if draft_requested:
             tool_name = self._find_tool("create_draft", tools)
@@ -258,28 +362,122 @@ OUTPUT FORMAT:
                     )
                 )
 
-        if read_requested or (not operations and "gmail" in normalized):
-            tool_name = self._find_tool("read_emails", tools)
+        if read_by_id_requested:
+            tool_name = self._find_tool("read_email", tools)
             if tool_name:
                 operations.append(
                     GmailOperation(
-                        operation="read_emails",
+                        operation="read_email",
+                        arguments={
+                            "messageId": extracted_params.get("messageId", ""),
+                        },
+                        description="Read Gmail message by ID",
+                    )
+                )
+
+        if (read_requested and not read_by_id_requested) or (not operations and "gmail" in normalized):
+            tool_name = self._find_tool("search_emails", tools)
+            if tool_name:
+                operations.append(
+                    GmailOperation(
+                        operation="search_emails",
                         arguments={
                             "query": extracted_params.get("query", "in:inbox newer_than:7d"),
                             "max_results": 20,
                         },
-                        description="Read/search Gmail messages",
+                        description="Search/list Gmail messages",
+                    )
+                )
+
+        if parse_requested:
+            tool_name = self._find_tool("parse_email", tools)
+            if tool_name:
+                operations.append(
+                    GmailOperation(
+                        operation="parse_email",
+                        arguments={
+                            "messageId": extracted_params.get("messageId", ""),
+                        },
+                        description="Parse Gmail message content",
+                    )
+                )
+
+        if label_requested:
+            tool_name = self._find_tool("add_label", tools)
+            if tool_name:
+                operations.append(
+                    GmailOperation(
+                        operation="add_label",
+                        arguments={
+                            "messageId": extracted_params.get("messageId", ""),
+                            "addLabelIds": ["processed"],
+                        },
+                        description="Add Gmail label",
+                    )
+                )
+
+        if thread_requested:
+            tool_name = self._find_tool("get_thread", tools)
+            if tool_name:
+                operations.append(
+                    GmailOperation(
+                        operation="get_thread",
+                        arguments={
+                            "threadId": extracted_params.get("threadId", ""),
+                            "messageId": extracted_params.get("messageId", ""),
+                        },
+                        description="Get Gmail thread",
+                    )
+                )
+
+        if reply_requested:
+            tool_name = self._find_tool("reply_email", tools)
+            if tool_name:
+                operations.append(
+                    GmailOperation(
+                        operation="reply_email",
+                        arguments={
+                            "threadId": extracted_params.get("threadId", ""),
+                            "messageId": extracted_params.get("messageId", ""),
+                            "body": extracted_params.get("body", ""),
+                        },
+                        description="Reply in Gmail thread",
+                    )
+                )
+
+        if attachment_requested:
+            tool_name = self._find_tool("get_attachments", tools)
+            if tool_name:
+                operations.append(
+                    GmailOperation(
+                        operation="get_attachments",
+                        arguments={
+                            "messageId": extracted_params.get("messageId", ""),
+                            "download": "download" in normalized,
+                        },
+                        description="Get Gmail attachments",
+                    )
+                )
+
+        if listen_requested:
+            tool_name = self._find_tool("listen_email_events", tools)
+            if tool_name:
+                operations.append(
+                    GmailOperation(
+                        operation="listen_email_events",
+                        arguments={},
+                        description="Listen for Gmail mailbox changes",
                     )
                 )
 
         if not operations:
-            fallback_tool = self._find_tool("read_emails", tools)
+            fallback_tool = self._find_tool("search_emails", tools)
             if fallback_tool:
                 operations.append(
                     GmailOperation(
-                        operation="read_emails",
+                        operation="search_emails",
                         arguments={"query": "in:inbox", "max_results": 20},
-                        description="Read Gmail messages",
+                        description="Search Gmail messages",
                     )
                 )
 
@@ -323,6 +521,18 @@ OUTPUT FORMAT:
         if "unread" in prompt.lower():
             return "is:unread"
 
+        return ""
+
+    def _extract_message_id(self, prompt: str) -> str:
+        match = re.search(r"(?:message[_\s-]?id|email[_\s-]?id)\s*[:=]\s*([A-Za-z0-9_-]+)", prompt, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        return ""
+
+    def _extract_thread_id(self, prompt: str) -> str:
+        match = re.search(r"thread[_\s-]?id\s*[:=]\s*([A-Za-z0-9_-]+)", prompt, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
         return ""
 
     def _find_tool(self, operation: str, tools: Dict[str, Any]) -> Optional[str]:

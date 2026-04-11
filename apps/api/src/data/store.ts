@@ -1,23 +1,28 @@
 import { v4 as uuidv4 } from "uuid";
 import type {
-  Workflow,
-  Integration,
   AuditLog,
-  User,
-  Settings,
+  Integration,
   Session,
+  Settings,
+  User,
+  Workflow,
   WorkflowExecution,
 } from "../types/index.js";
+import {
+  saveEventLog,
+  saveServiceConnection,
+  saveWorkflowDefinition,
+  saveWorkflowExecution,
+} from "../services/postgres-store.js";
 
-// In-memory data store (simulating a database)
 class DataStore {
   private workflows: Map<string, Workflow> = new Map();
+  private executions: Map<string, WorkflowExecution> = new Map();
   private integrations: Map<string, Integration> = new Map();
   private logs: AuditLog[] = [];
   private users: Map<string, User> = new Map();
   private sessions: Map<string, Session> = new Map();
   private settings: Settings;
-  private executions: Map<string, WorkflowExecution> = new Map();
 
   constructor() {
     this.settings = this.getDefaultSettings();
@@ -196,20 +201,68 @@ class DataStore {
         status: "disconnected",
         capabilities: [
           {
-            id: "sheets-read",
-            name: "Read Sheet",
-            type: "query",
-            description: "Read values from a spreadsheet",
-            inputSchema: { spreadsheetId: "string", range: "string" },
-            outputSchema: { values: "array" },
+            id: "sheets-add-row",
+            name: "Add Row",
+            type: "action",
+            description: "Add a new row to a spreadsheet",
+            inputSchema: {
+              spreadsheetId: "string",
+              sheetName: "string",
+              rowData: "array",
+            },
+            outputSchema: { updatedRange: "string", updatedRows: "number" },
           },
           {
-            id: "sheets-append",
-            name: "Append Row",
+            id: "sheets-get-rows",
+            name: "Get Rows",
+            type: "query",
+            description: "Get rows from a spreadsheet",
+            inputSchema: { spreadsheetId: "string", range: "string" },
+            outputSchema: {
+              headers: "array",
+              rows: "array",
+              rowCount: "number",
+            },
+          },
+          {
+            id: "sheets-update-row",
+            name: "Update Row",
             type: "action",
-            description: "Append a row to a spreadsheet",
-            inputSchema: { spreadsheetId: "string", values: "array" },
-            outputSchema: { updatedRange: "string" },
+            description: "Update a row in a spreadsheet",
+            inputSchema: {
+              spreadsheetId: "string",
+              rowIndex: "number",
+              values: "array",
+            },
+            outputSchema: { updatedRange: "string", updatedCells: "number" },
+          },
+          {
+            id: "sheets-delete-row",
+            name: "Delete Row",
+            type: "action",
+            description: "Delete a row from a spreadsheet",
+            inputSchema: { spreadsheetId: "string", rowIndex: "number" },
+            outputSchema: { ok: "boolean", deletedRowIndex: "number" },
+          },
+          {
+            id: "sheets-query-rows",
+            name: "Query Rows",
+            type: "query",
+            description: "Filter rows based on query conditions",
+            inputSchema: {
+              spreadsheetId: "string",
+              query: "string",
+              filters: "object",
+            },
+            outputSchema: { rows: "array", count: "number" },
+          },
+          {
+            id: "sheets-list-sheets",
+            name: "List Sheets",
+            type: "query",
+            description: "List tabs available in a spreadsheet",
+            inputSchema: { spreadsheetId: "string" },
+            outputSchema: { sheets: "array", count: "number" },
           },
         ],
       },
@@ -235,31 +288,6 @@ class DataStore {
             description: "List mailbox messages",
             inputSchema: { query: "string" },
             outputSchema: { messages: "array" },
-          },
-        ],
-      },
-      {
-        id: "int-aws",
-        service: "aws",
-        name: "AWS",
-        description: "Cloud infrastructure and serverless operations",
-        status: "disconnected",
-        capabilities: [
-          {
-            id: "aws-invoke-lambda",
-            name: "Invoke Lambda",
-            type: "action",
-            description: "Invoke an AWS Lambda function",
-            inputSchema: { functionName: "string", payload: "object" },
-            outputSchema: { statusCode: "number" },
-          },
-          {
-            id: "aws-list-buckets",
-            name: "List S3 Buckets",
-            type: "query",
-            description: "List S3 buckets",
-            inputSchema: {},
-            outputSchema: { buckets: "array" },
           },
         ],
       },
@@ -385,6 +413,9 @@ class DataStore {
       executionHistory: [],
     };
     this.workflows.set(newWorkflow.id, newWorkflow);
+    void saveWorkflowDefinition(newWorkflow).catch((error) => {
+      console.error("PostgreSQL workflow save failed:", error);
+    });
     this.addLog({
       level: "info",
       service: "system",
@@ -407,6 +438,9 @@ class DataStore {
       updatedAt: new Date().toISOString(),
     };
     this.workflows.set(id, updated);
+    void saveWorkflowDefinition(updated).catch((error) => {
+      console.error("PostgreSQL workflow update save failed:", error);
+    });
     this.addLog({
       level: "info",
       service: "system",
@@ -477,6 +511,19 @@ class DataStore {
       lastSync: new Date().toISOString(),
     };
     this.integrations.set(id, updated);
+    void saveServiceConnection({
+      connectionId: id,
+      serviceName: updated.service,
+      apiKey: credentials?.apiKey || credentials?.username,
+      token:
+        credentials?.accessToken ||
+        credentials?.refreshToken ||
+        credentials?.apiSecret ||
+        credentials?.password,
+      scopes: [],
+    }).catch((error) => {
+      console.error("PostgreSQL connection save failed:", error);
+    });
     this.addLog({
       level: "info",
       service: updated.service,
@@ -497,6 +544,13 @@ class DataStore {
       lastSync: undefined,
     };
     this.integrations.set(id, updated);
+    void saveServiceConnection({
+      connectionId: id,
+      serviceName: updated.service,
+      scopes: [],
+    }).catch((error) => {
+      console.error("PostgreSQL connection clear failed:", error);
+    });
     this.addLog({
       level: "info",
       service: updated.service,
@@ -552,6 +606,10 @@ class DataStore {
     if (this.logs.length > 1000) {
       this.logs = this.logs.slice(0, 1000);
     }
+
+    void saveEventLog(newLog).catch((error) => {
+      console.error("PostgreSQL event log save failed:", error);
+    });
 
     return newLog;
   }
@@ -623,6 +681,9 @@ class DataStore {
     };
 
     this.executions.set(execution.id, execution);
+    void saveWorkflowExecution(execution).catch((error) => {
+      console.error("PostgreSQL execution save failed:", error);
+    });
 
     // Update workflow status
     workflow.status = "running";
@@ -656,6 +717,9 @@ class DataStore {
       ...updates,
     };
     this.executions.set(id, updated);
+    void saveWorkflowExecution(updated).catch((error) => {
+      console.error("PostgreSQL execution update save failed:", error);
+    });
     return updated;
   }
 }

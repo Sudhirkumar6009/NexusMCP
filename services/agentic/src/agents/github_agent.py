@@ -169,15 +169,18 @@ class GitHubAgent(BaseAgent):
             extracted["issue_key"] = issue_match.group(1)
 
         repo_patterns = [
-            r"\brepo(?:sitory)?\s+([a-zA-Z0-9._/-]+)",
-            r"\bin\s+repo(?:sitory)?\s+([a-zA-Z0-9._/-]+)",
-            r"\bin\s+([a-zA-Z0-9._/-]+)\s+repo(?:sitory)?",
+            r"\brepo(?:sitory)?(?:\s+(?:is|as|named|name))?\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\b",
+            r"\bin\s+repo(?:sitory)?(?:\s+(?:is|as|named|name))?\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\b",
+            r"\bin\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\s+repo(?:sitory)?\b",
         ]
+        invalid_repo_tokens = {"as", "is", "name", "named", "repo", "repository"}
         for pattern in repo_patterns:
             repo_match = re.search(pattern, prompt, re.IGNORECASE)
             if repo_match:
-                extracted["repo"] = repo_match.group(1)
-                break
+                repo_candidate = repo_match.group(1).strip()
+                if repo_candidate.lower() not in invalid_repo_tokens:
+                    extracted["repo"] = repo_candidate
+                    break
 
         branch_match = re.search(
             r"\b(?:branch(?:\s+name)?|head)\s+([a-zA-Z0-9._/-]+)\b",
@@ -586,14 +589,23 @@ OUTPUT FORMAT:
         extracted_params: Dict[str, str] = {}
 
         # Extract repository name
-        repo_match = re.search(r"\brepo(?:sitory)?\s+([a-zA-Z0-9._/-]+)", prompt, re.IGNORECASE)
-        if repo_match:
-            extracted_params["repo"] = repo_match.group(1)
-        
-        # Also check for "in <repo>" pattern
-        in_repo_match = re.search(r"\bin\s+([a-zA-Z0-9._-]+)\s*(?:repo|repository)?", prompt, re.IGNORECASE)
-        if in_repo_match and "repo" not in extracted_params:
-            extracted_params["repo"] = in_repo_match.group(1)
+        repo_patterns = [
+            r"\brepo(?:sitory)?(?:\s+(?:is|as|named|name))?\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\b",
+            r"\bin\s+repo(?:sitory)?(?:\s+(?:is|as|named|name))?\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\b",
+            r"\bin\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\s+repo(?:sitory)?\b",
+        ]
+        invalid_repo_tokens = {"as", "is", "name", "named", "repo", "repository"}
+        for pattern in repo_patterns:
+            repo_match = re.search(pattern, prompt, re.IGNORECASE)
+            if not repo_match:
+                continue
+
+            repo_candidate = repo_match.group(1).strip()
+            if repo_candidate.lower() in invalid_repo_tokens:
+                continue
+
+            extracted_params["repo"] = repo_candidate
+            break
 
         # Extract issue key for branch naming
         issue_match = re.search(r"\b([A-Z][A-Z0-9]+-\d+)\b", prompt)
