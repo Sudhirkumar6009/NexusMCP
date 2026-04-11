@@ -11,6 +11,7 @@ const TEST_LOGIN_EMAIL = "test123@gmail.com";
 const TEST_LOGIN_PASSWORD = "Test@123";
 const TEST_LOGIN_USER_ID = "test-login-user";
 const TEST_LOGIN_USER_ROLE: IUser["role"] = "admin";
+const TEST_LOGIN_DEFAULT_NAME = "Test User";
 const GOOGLE_BASE_AUTH_SCOPES = ["profile", "email"] as const;
 const GOOGLE_GMAIL_READ_SCOPE =
   "https://www.googleapis.com/auth/gmail.readonly";
@@ -115,18 +116,32 @@ function buildGmailRawMessage(args: {
 
 function buildTestLoginUser() {
   const adminUser = dataStore.getUser("user-admin");
-  const now = new Date().toISOString();
 
   return {
     id: TEST_LOGIN_USER_ID,
     email: TEST_LOGIN_EMAIL,
-    name: "Test User",
-    avatar: undefined,
+    name: testLoginProfile.name,
+    avatar: testLoginProfile.avatar,
     role: TEST_LOGIN_USER_ROLE,
     permissions: adminUser?.permissions ?? [],
-    createdAt: now,
-    lastLogin: now,
+    createdAt: testLoginProfile.createdAt,
+    lastLogin: testLoginProfile.lastLogin,
   };
+}
+
+const testLoginProfile: {
+  name: string;
+  avatar?: string;
+  createdAt: string;
+  lastLogin: string;
+} = {
+  name: TEST_LOGIN_DEFAULT_NAME,
+  createdAt: new Date().toISOString(),
+  lastLogin: new Date().toISOString(),
+};
+
+function touchTestLoginProfile() {
+  testLoginProfile.lastLogin = new Date().toISOString();
 }
 
 function buildTestLoginTokenUser() {
@@ -480,6 +495,7 @@ router.post("/test-login", (req: Request, res: Response) => {
       return;
     }
 
+    touchTestLoginProfile();
     const token = generateToken(buildTestLoginTokenUser());
 
     dataStore.addLog({
@@ -549,6 +565,34 @@ router.put("/me", authenticateToken, async (req: Request, res: Response) => {
     const userId = (req as AuthenticatedRequest).userId;
     const { name, avatar } = req.body;
 
+    if (userId === TEST_LOGIN_USER_ID) {
+      const trimmedName =
+        typeof name === "string" ? name.trim() : undefined;
+
+      if (trimmedName !== undefined) {
+        if (!trimmedName) {
+          res.status(400).json({
+            success: false,
+            error: "Name cannot be empty",
+          });
+          return;
+        }
+
+        testLoginProfile.name = trimmedName;
+      }
+
+      if (typeof avatar === "string") {
+        testLoginProfile.avatar = avatar || undefined;
+      }
+
+      res.json({
+        success: true,
+        data: buildTestLoginUser(),
+        message: "Profile updated successfully",
+      });
+      return;
+    }
+
     const user = await User.findById(userId);
 
     if (!user) {
@@ -560,7 +604,17 @@ router.put("/me", authenticateToken, async (req: Request, res: Response) => {
     }
 
     // Update allowed fields
-    if (name) user.name = name;
+    if (typeof name === "string") {
+      const trimmedName = name.trim();
+      if (!trimmedName) {
+        res.status(400).json({
+          success: false,
+          error: "Name cannot be empty",
+        });
+        return;
+      }
+      user.name = trimmedName;
+    }
     if (avatar) user.avatar = avatar;
 
     await user.save();
