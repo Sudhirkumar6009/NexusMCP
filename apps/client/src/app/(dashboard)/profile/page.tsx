@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
-import { formatDateTime, formatRelativeTime, getInitials } from "@/lib/utils";
+import { getInitials } from "@/lib/utils";
 import { User, Shield, Key, Save, CheckCircle2, Pencil } from "lucide-react";
 
 export default function ProfilePage() {
@@ -227,22 +227,6 @@ export default function ProfilePage() {
                   hint="Email cannot be changed"
                 />
               </div>
-            </div>
-          </div>
-          <div className="flex items-center gap-4 pt-4 border-t border-border">
-            <div>
-              <p className="text-sm text-content-secondary">Member since</p>
-              <p className="text-sm font-medium text-content-primary">
-                {formatDateTime(user.createdAt)}
-              </p>
-            </div>
-            <div>
-              <p className="text-sm text-content-secondary">Last login</p>
-              <p className="text-sm font-medium text-content-primary">
-                {user.lastLoginAt
-                  ? formatRelativeTime(user.lastLoginAt)
-                  : "Never"}
-              </p>
             </div>
           </div>
         </CardContent>
