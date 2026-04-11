@@ -34,6 +34,11 @@ type SlackConfig = {
   token: string;
 };
 
+type SlackMessageDispatchOptions = {
+  tokenCandidates: string[];
+  webhookUrl?: string;
+};
+
 type GmailConfig = {
   accessToken: string;
   refreshToken?: string;
@@ -289,6 +294,52 @@ function parseJsonLikePayload(value: unknown): JsonRecord {
 function parseIssueKeyFromPrompt(prompt: string): string | undefined {
   const match = prompt.match(/\b([A-Z][A-Z0-9]+-\d+)\b/);
   return match?.[1];
+}
+
+function parseIssueKeysFromPrompt(prompt: string): string[] {
+  const collected: string[] = [];
+  const seen = new Set<string>();
+
+  const directMatches = prompt.match(/\b([A-Z][A-Z0-9]+-\d+)\b/g) || [];
+  for (const issueKey of directMatches) {
+    const normalized = issueKey.toUpperCase();
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      collected.push(normalized);
+    }
+  }
+
+  const rangePattern =
+    /\b([A-Z][A-Z0-9]+)-(\d+)\s*(?:to|-)\s*(?:([A-Z][A-Z0-9]+)-)?(\d+)\b/i;
+  const rangeMatch = prompt.match(rangePattern);
+  if (rangeMatch) {
+    const startPrefix = (rangeMatch[1] || "").toUpperCase();
+    const startRaw = Number(rangeMatch[2]);
+    const endPrefix = (rangeMatch[3] || startPrefix).toUpperCase();
+    const endRaw = Number(rangeMatch[4]);
+
+    if (
+      startPrefix &&
+      endPrefix &&
+      startPrefix === endPrefix &&
+      Number.isFinite(startRaw) &&
+      Number.isFinite(endRaw)
+    ) {
+      const start = Math.floor(Math.min(startRaw, endRaw));
+      const end = Math.floor(Math.max(startRaw, endRaw));
+      if (end - start <= 200) {
+        for (let value = start; value <= end; value += 1) {
+          const key = `${startPrefix}-${value}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            collected.push(key);
+          }
+        }
+      }
+    }
+  }
+
+  return collected;
 }
 
 function parseRepoFromPrompt(prompt: string): string | undefined {
@@ -980,6 +1031,65 @@ function getSlackConfig(params: JsonRecord): SlackConfig {
   return { token };
 }
 
+function getSlackMessageDispatchOptions(
+  params: JsonRecord,
+): SlackMessageDispatchOptions {
+  const integration = getConnectedIntegration("slack");
+  const credentials = asRecord(integration.credentials);
+
+  const tokenCandidates = [
+    pickString(params, ["accessToken", "apiKey", "token"]),
+    pickString(credentials, ["accessToken", "apiKey", "token"]),
+    typeof process.env.SLACK_BOT_TOKEN === "string"
+      ? process.env.SLACK_BOT_TOKEN.trim()
+      : undefined,
+    typeof process.env.SLACK_TOKEN === "string"
+      ? process.env.SLACK_TOKEN.trim()
+      : undefined,
+  ]
+    .filter((value): value is string => Boolean(value && value.trim()))
+    .map((value) => value.trim());
+
+  const dedupedTokens = Array.from(new Set(tokenCandidates));
+
+  const webhookUrl =
+    pickString(params, ["webhookUrl", "webhook_url"]) ||
+    pickString(credentials, ["webhookUrl", "webhook_url"]) ||
+    (typeof process.env.SLACK_WEBHOOK_URL === "string"
+      ? process.env.SLACK_WEBHOOK_URL.trim()
+      : undefined);
+
+  return {
+    tokenCandidates: dedupedTokens,
+    ...(webhookUrl ? { webhookUrl } : {}),
+  };
+}
+
+async function slackIncomingWebhookRequest(
+  webhookUrl: string,
+  payload: JsonRecord,
+): Promise<void> {
+  const response = await fetch(webhookUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const body = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `Slack incoming webhook failed (${response.status}): ${body || response.statusText || "Unknown Slack webhook error"}`,
+    );
+  }
+
+  const normalizedBody = body.trim().toLowerCase();
+  if (normalizedBody && normalizedBody !== "ok") {
+    throw new Error(`Slack incoming webhook failed: ${body}`);
+  }
+}
+
 async function slackApiRequest(
   config: SlackConfig,
   method: string,
@@ -1045,18 +1155,36 @@ async function resolveSlackChannelId(
   }
 
   const normalizedName = trimmed.replace(/^#/, "").toLowerCase();
-  const listPayload = await slackApiRequest(
-    config,
-    "conversations.list",
-    {
-      limit: 1000,
-      types: "public_channel,private_channel,mpim,im",
-      exclude_archived: true,
-    },
-    { httpMethod: "GET" },
-  );
+  let channels: unknown[] = [];
+  try {
+    const listPayload = await slackApiRequest(
+      config,
+      "conversations.list",
+      {
+        limit: 1000,
+        types: "public_channel,private_channel,mpim,im",
+        exclude_archived: true,
+      },
+      { httpMethod: "GET" },
+    );
+    channels = parseBodyAsList(listPayload.channels);
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message.toLowerCase() : String(error);
 
-  const channels = parseBodyAsList(listPayload.channels);
+    // Some Slack token types cannot call conversations.list. In this case,
+    // continue with the user-provided channel instead of failing send_message.
+    if (
+      message.includes("not_allowed_token_type") ||
+      message.includes("missing_scope") ||
+      message.includes("method_not_supported_for_token_type")
+    ) {
+      return trimmed;
+    }
+
+    throw error;
+  }
+
   const matched = channels.find((entry) => {
     const channel = parseBodyAsRecord(entry);
     const id = pickString(channel, ["id"]);
@@ -1069,11 +1197,11 @@ async function resolveSlackChannelId(
   });
 
   if (!matched) {
-    return trimmed.replace(/^#/, "");
+    return trimmed;
   }
 
   const matchedChannel = parseBodyAsRecord(matched);
-  return pickString(matchedChannel, ["id"]) || trimmed.replace(/^#/, "");
+  return pickString(matchedChannel, ["id"]) || trimmed;
 }
 
 async function resolveSlackUserId(
@@ -1265,6 +1393,24 @@ function normalizeSheetValues(input: unknown): unknown[][] {
   }
 
   return [input];
+}
+
+function hasMeaningfulSheetValues(values: unknown[][]): boolean {
+  return values.some((row) =>
+    Array.isArray(row)
+      ? row.some((cell) => {
+          if (cell === null || cell === undefined) {
+            return false;
+          }
+
+          if (typeof cell === "string") {
+            return cell.trim().length > 0;
+          }
+
+          return true;
+        })
+      : false,
+  );
 }
 
 function toSheetColumnName(columnNumber: number): string {
@@ -2366,7 +2512,7 @@ const handlers: Record<string, MCPHandler> = {
   // Slack methods
   "slack.sendMessage": async (params) => {
     const payload = params as JsonRecord;
-    const config = getSlackConfig(payload);
+    const dispatchOptions = getSlackMessageDispatchOptions(payload);
     const text =
       pickString(payload, ["text", "message", "body"]) || "NexusMCP update";
     const channelInput = pickString(payload, ["channel", "channel_id", "to"]);
@@ -2374,35 +2520,171 @@ const handlers: Record<string, MCPHandler> = {
       throw new Error("Slack channel is required.");
     }
 
-    const channel = await resolveSlackChannelId(config, channelInput);
+    if (
+      dispatchOptions.tokenCandidates.length === 0 &&
+      !dispatchOptions.webhookUrl
+    ) {
+      throw new Error(
+        "Slack credentials are missing. Connect Slack with a bot token (chat:write) or configure SLACK_WEBHOOK_URL.",
+      );
+    }
+
     const blocks = Array.isArray(payload.blocks) ? payload.blocks : undefined;
     const attachments = Array.isArray(payload.attachments)
       ? payload.attachments
       : undefined;
     const threadTs = pickString(payload, ["thread_ts", "threadTs"]);
 
-    const result = await slackApiRequest(config, "chat.postMessage", {
-      channel,
-      text,
-      ...(blocks ? { blocks } : {}),
-      ...(attachments ? { attachments } : {}),
-      ...(threadTs ? { thread_ts: threadTs } : {}),
-    });
+    const rawChannelInput = channelInput.trim();
+    let deliveredChannel: string | null = null;
+    let dispatchedVia: "chat.postMessage" | "incoming_webhook" | null = null;
+    let lastError: unknown = null;
 
-    dataStore.addLog({
-      level: "info",
-      service: "slack",
-      action: "send_message",
-      message: `Sent Slack message to ${channel}`,
-      details: { channel, textPreview: text.slice(0, 80) },
-    });
+    for (const token of dispatchOptions.tokenCandidates) {
+      const config: SlackConfig = { token };
+      let resolvedChannel = rawChannelInput;
 
-    return {
-      ok: true,
-      ts: result.ts,
-      channel: result.channel,
-      message: result.message,
-    };
+      try {
+        resolvedChannel = await resolveSlackChannelId(config, rawChannelInput);
+      } catch (error) {
+        lastError = error;
+        continue;
+      }
+
+      const channelCandidates = Array.from(
+        new Set(
+          [
+            resolvedChannel,
+            rawChannelInput,
+            rawChannelInput.startsWith("#")
+              ? rawChannelInput.replace(/^#+/, "")
+              : `#${rawChannelInput}`,
+          ].filter((value): value is string => Boolean(value && value.trim())),
+        ),
+      );
+
+      for (const candidate of channelCandidates) {
+        try {
+          const result = await slackApiRequest(config, "chat.postMessage", {
+            channel: candidate,
+            text,
+            ...(blocks ? { blocks } : {}),
+            ...(attachments ? { attachments } : {}),
+            ...(threadTs ? { thread_ts: threadTs } : {}),
+          });
+
+          deliveredChannel = String(result.channel || candidate);
+          dispatchedVia = "chat.postMessage";
+
+          dataStore.addLog({
+            level: "info",
+            service: "slack",
+            action: "send_message",
+            message: `Sent Slack message to ${deliveredChannel}`,
+            details: {
+              channel: deliveredChannel,
+              requestedChannel: rawChannelInput,
+              dispatch: "chat.postMessage",
+              textPreview: text.slice(0, 80),
+            },
+          });
+
+          return {
+            ok: true,
+            ts: result.ts,
+            channel: result.channel,
+            message: result.message,
+            dispatch: "chat.postMessage",
+          };
+        } catch (error) {
+          lastError = error;
+          const message =
+            error instanceof Error
+              ? error.message.toLowerCase()
+              : String(error);
+
+          if (message.includes("channel_not_found")) {
+            continue;
+          }
+
+          if (
+            message.includes("not_allowed_token_type") ||
+            message.includes("invalid_auth") ||
+            message.includes("missing_scope")
+          ) {
+            break;
+          }
+
+          throw error;
+        }
+      }
+    }
+
+    if (dispatchOptions.webhookUrl) {
+      const webhookPayload: JsonRecord = {
+        text,
+        ...(blocks ? { blocks } : {}),
+        ...(attachments ? { attachments } : {}),
+      };
+
+      if (!threadTs) {
+        webhookPayload.channel = rawChannelInput;
+      }
+
+      await slackIncomingWebhookRequest(
+        dispatchOptions.webhookUrl,
+        webhookPayload,
+      );
+
+      deliveredChannel = rawChannelInput;
+      dispatchedVia = "incoming_webhook";
+
+      dataStore.addLog({
+        level: "info",
+        service: "slack",
+        action: "send_message",
+        message: `Sent Slack message to ${deliveredChannel} via incoming webhook`,
+        details: {
+          channel: deliveredChannel,
+          requestedChannel: rawChannelInput,
+          dispatch: "incoming_webhook",
+          textPreview: text.slice(0, 80),
+        },
+      });
+
+      return {
+        ok: true,
+        channel: deliveredChannel,
+        message: {
+          text,
+          dispatched_via: "incoming_webhook",
+        },
+        dispatch: "incoming_webhook",
+      };
+    }
+
+    const defaultError =
+      lastError instanceof Error
+        ? lastError
+        : new Error(
+            "Slack chat.postMessage failed for all token/channel attempts.",
+          );
+
+    if (/not_allowed_token_type/i.test(defaultError.message)) {
+      throw new Error(
+        `${defaultError.message}. Use a Slack bot token (xoxb with chat:write) or configure SLACK_WEBHOOK_URL as fallback.`,
+      );
+    }
+
+    if (deliveredChannel || dispatchedVia) {
+      return {
+        ok: true,
+        channel: deliveredChannel,
+        dispatch: dispatchedVia,
+      };
+    }
+
+    throw defaultError;
   },
 
   "slack.getChannels": async (params) => {
@@ -2477,7 +2759,9 @@ const handlers: Record<string, MCPHandler> = {
       topic: pickString(parseBodyAsRecord(details.topic), ["value"]),
       purpose: pickString(parseBodyAsRecord(details.purpose), ["value"]),
       num_members:
-        typeof details.num_members === "number" ? details.num_members : undefined,
+        typeof details.num_members === "number"
+          ? details.num_members
+          : undefined,
     };
   },
 
@@ -2593,7 +2877,11 @@ const handlers: Record<string, MCPHandler> = {
       ? payload.attachments
       : undefined;
 
-    const explicitChannel = pickString(payload, ["channel", "channel_id", "group"]);
+    const explicitChannel = pickString(payload, [
+      "channel",
+      "channel_id",
+      "group",
+    ]);
     const recipients = parseBodyAsList(payload.users ?? payload.recipients)
       .map((entry) => String(entry).trim())
       .filter(Boolean);
@@ -2691,18 +2979,20 @@ const handlers: Record<string, MCPHandler> = {
     };
   },
 
-  "slack.postThreadReply": async (params) => {
+  "slack.replyInThread": async (params) => {
     const payload = params as JsonRecord;
     const config = getSlackConfig(payload);
     const channelInput = pickString(payload, ["channel", "channel_id"]);
     const threadTs = pickString(payload, ["thread_ts", "threadTs", "ts"]);
     const text =
       pickString(payload, ["text", "message", "body"]) || "Thread reply";
+    const blocks = Array.isArray(payload.blocks) ? payload.blocks : undefined;
+    const attachments = Array.isArray(payload.attachments)
+      ? payload.attachments
+      : undefined;
 
     if (!channelInput || !threadTs) {
-      throw new Error(
-        "slack.post_thread_reply requires channel and thread_ts.",
-      );
+      throw new Error("slack.reply_in_thread requires channel and thread_ts.");
     }
 
     const channel = await resolveSlackChannelId(config, channelInput);
@@ -2710,6 +3000,16 @@ const handlers: Record<string, MCPHandler> = {
       channel,
       thread_ts: threadTs,
       text,
+      ...(blocks ? { blocks } : {}),
+      ...(attachments ? { attachments } : {}),
+    });
+
+    dataStore.addLog({
+      level: "info",
+      service: "slack",
+      action: "reply_in_thread",
+      message: `Posted reply in Slack thread ${threadTs}`,
+      details: { channel, threadTs },
     });
 
     return {
@@ -2717,6 +3017,204 @@ const handlers: Record<string, MCPHandler> = {
       channel: reply.channel,
       ts: reply.ts,
       thread_ts: threadTs,
+    };
+  },
+
+  "slack.postThreadReply": async (params) => {
+    const payload = params as JsonRecord;
+    return handlers["slack.replyInThread"](payload);
+  },
+
+  "slack.getThreadMessages": async (params) => {
+    const payload = params as JsonRecord;
+    const config = getSlackConfig(payload);
+    const channelInput = pickString(payload, ["channel", "channel_id"]);
+    const threadTs = pickString(payload, ["thread_ts", "threadTs", "ts"]);
+    const limitRaw = Number(payload.limit ?? 50);
+    const limit = Number.isFinite(limitRaw)
+      ? Math.max(1, Math.min(200, Math.floor(limitRaw)))
+      : 50;
+
+    if (!channelInput || !threadTs) {
+      throw new Error(
+        "slack.get_thread_messages requires channel and thread_ts.",
+      );
+    }
+
+    const channel = await resolveSlackChannelId(config, channelInput);
+    const replies = await slackApiRequest(
+      config,
+      "conversations.replies",
+      { channel, ts: threadTs, limit },
+      { httpMethod: "GET" },
+    );
+
+    const messages = parseBodyAsList(replies.messages).map((entry) => {
+      const message = parseBodyAsRecord(entry);
+      return {
+        user: pickString(message, ["user"]),
+        text: pickString(message, ["text"]),
+        ts: pickString(message, ["ts"]),
+        thread_ts: pickString(message, ["thread_ts"]),
+        bot_id: pickString(message, ["bot_id"]),
+      };
+    });
+
+    return {
+      channel,
+      thread_ts: threadTs,
+      messages,
+      count: messages.length,
+    };
+  },
+
+  "slack.listenSlackEvents": async (params) => {
+    const payload = params as JsonRecord;
+    const requestedEventTypes = parseBodyAsList(
+      payload.event_types ?? payload.eventTypes,
+    )
+      .map((entry) => String(entry).trim().toLowerCase())
+      .filter(Boolean);
+
+    const eventTypes =
+      requestedEventTypes.length > 0
+        ? requestedEventTypes
+        : ["message", "mention", "slash_command"];
+
+    const endpoint =
+      pickString(payload, ["endpoint", "webhook", "path"]) ||
+      process.env.SLACK_EVENTS_ENDPOINT ||
+      "/api/integrations/slack/events";
+
+    const incoming = parseJsonLikePayload(
+      payload.payload ?? payload.body ?? payload.event,
+    );
+
+    if (Object.keys(incoming).length === 0) {
+      return {
+        listening: false,
+        mode: "configuration",
+        endpoint,
+        event_types: eventTypes,
+        signing_secret_configured: Boolean(process.env.SLACK_SIGNING_SECRET),
+        note: "Pass payload/body to normalize incoming Slack Events API or slash-command payloads.",
+      };
+    }
+
+    const envelopeType = pickString(incoming, ["type"]);
+    if (envelopeType === "url_verification") {
+      return {
+        listening: true,
+        acknowledged: true,
+        challenge: pickString(incoming, ["challenge"]),
+      };
+    }
+
+    const event = parseBodyAsRecord(incoming.event);
+    const slashCommand = pickString(incoming, ["command"]);
+    const eventType = pickString(event, ["type"]);
+
+    let normalizedEventType = "other";
+    if (slashCommand) {
+      normalizedEventType = "slash_command";
+    } else if (eventType === "app_mention") {
+      normalizedEventType = "mention";
+    } else if (eventType === "message") {
+      normalizedEventType = "message";
+    }
+
+    const shouldTrigger = eventTypes.includes(normalizedEventType);
+
+    const normalizedPayload = {
+      event_type: normalizedEventType,
+      slack_event_type: eventType || slashCommand || envelopeType,
+      command: slashCommand,
+      text: pickString(event, ["text"]) || pickString(incoming, ["text"]),
+      user: pickString(event, ["user"]) || pickString(incoming, ["user_id"]),
+      channel:
+        pickString(event, ["channel"]) || pickString(incoming, ["channel_id"]),
+      ts: pickString(event, ["ts"]) || pickString(incoming, ["trigger_id"]),
+    };
+
+    dataStore.addLog({
+      level: "info",
+      service: "slack",
+      action: "listen_slack_events",
+      message: `Processed Slack event ${normalizedPayload.event_type}`,
+      details: {
+        shouldTrigger,
+        eventType: normalizedPayload.slack_event_type,
+      },
+    });
+
+    return {
+      listening: true,
+      acknowledged: true,
+      should_trigger_workflow: shouldTrigger,
+      subscribed_event_types: eventTypes,
+      event: normalizedPayload,
+    };
+  },
+
+  "slack.handleInteractions": async (params) => {
+    const payload = params as JsonRecord;
+    const incoming = parseJsonLikePayload(
+      payload.payload ?? payload.body ?? payload.interaction,
+    );
+
+    if (Object.keys(incoming).length === 0) {
+      throw new Error(
+        "slack.handle_interactions requires payload/body with Slack interaction data.",
+      );
+    }
+
+    const interactionType = pickString(incoming, ["type"]) || "unknown";
+    const user = parseBodyAsRecord(incoming.user);
+    const channel = parseBodyAsRecord(incoming.channel);
+    const actions = parseBodyAsList(incoming.actions);
+    const firstAction = parseBodyAsRecord(actions[0]);
+
+    const actionId =
+      pickString(firstAction, ["action_id"]) ||
+      pickString(firstAction, ["name"]) ||
+      pickString(incoming, ["callback_id"]) ||
+      "unknown";
+    const actionValue = pickString(firstAction, ["value", "text", "name"]);
+
+    const decision =
+      /approve/i.test(actionId) || /approve/i.test(actionValue || "")
+        ? "approved"
+        : /reject|deny/i.test(actionId) ||
+            /reject|deny/i.test(actionValue || "")
+          ? "rejected"
+          : "handled";
+
+    dataStore.addLog({
+      level: "info",
+      service: "slack",
+      action: "handle_interactions",
+      message: `Handled Slack interaction ${actionId}`,
+      details: {
+        interactionType,
+        decision,
+        user: pickString(user, ["id", "username"]),
+      },
+    });
+
+    return {
+      handled: true,
+      interaction_type: interactionType,
+      action_id: actionId,
+      decision,
+      user: {
+        id: pickString(user, ["id"]),
+        username: pickString(user, ["username"]),
+      },
+      channel: {
+        id: pickString(channel, ["id"]),
+        name: pickString(channel, ["name"]),
+      },
+      response_url: pickString(incoming, ["response_url"]),
     };
   },
 
@@ -3154,9 +3652,13 @@ const handlers: Record<string, MCPHandler> = {
     const payload = params as JsonRecord;
     const config = await getSheetsConfig(payload);
 
-    const values = normalizeSheetValues(
+    let values = normalizeSheetValues(
       payload.values ?? payload.row_data ?? payload.value ?? "",
     );
+
+    const sheetName =
+      pickString(payload, ["sheet_name", "sheet", "tab"]) || "Sheet1";
+    const prompt = pickString(payload, ["prompt", "input"]) || "";
 
     let range = pickString(payload, ["range"]);
     if (!range) {
@@ -3169,8 +3671,6 @@ const handlers: Record<string, MCPHandler> = {
           payload.column_number ??
           payload.columnIndex,
       );
-      const sheetName =
-        pickString(payload, ["sheet_name", "sheet", "tab"]) || "Sheet1";
 
       if (Number.isFinite(rowRaw) && Number.isFinite(columnRaw)) {
         const row = Math.max(1, Math.floor(rowRaw));
@@ -3183,8 +3683,37 @@ const handlers: Record<string, MCPHandler> = {
     }
 
     if (!range) {
+      // If range is missing but prompt clearly asks to add entries, infer rows
+      // and append them instead of failing hard.
+      if (!hasMeaningfulSheetValues(values)) {
+        const issueKeys = parseIssueKeysFromPrompt(prompt);
+        if (issueKeys.length > 0) {
+          const generatedAt = new Date().toISOString();
+          values = issueKeys.map((issueKey) => [
+            issueKey,
+            "Latest details",
+            generatedAt,
+          ]);
+        }
+      }
+
+      if (hasMeaningfulSheetValues(values)) {
+        const appendResult = await handlers["sheets.appendRow"]({
+          ...payload,
+          sheet_name: sheetName,
+          values,
+          range: `${sheetName}!A:ZZ`,
+        });
+
+        return {
+          ...(asRecord(appendResult) as JsonRecord),
+          mode: "append_fallback",
+          reason: "range_missing",
+        };
+      }
+
       throw new Error(
-        "sheets.update_cells requires range, or row+column coordinates.",
+        "sheets.update_cells requires range, or row+column coordinates. Provide range/coordinates, or include non-empty values.",
       );
     }
 
@@ -4462,7 +4991,10 @@ const handlers: Record<string, MCPHandler> = {
       `/repos/${repo}/events?per_page=${limit}`,
     );
 
-    const eventTypeMap: Record<string, "push" | "pull_request" | "issue" | "other"> = {
+    const eventTypeMap: Record<
+      string,
+      "push" | "pull_request" | "issue" | "other"
+    > = {
       PushEvent: "push",
       PullRequestEvent: "pull_request",
       IssuesEvent: "issue",
@@ -4593,11 +5125,28 @@ export async function executeNode(
     },
     slack: {
       "send-message": "slack.sendMessage",
+      send_message: "slack.sendMessage",
       "on-message": "slack.sendMessage",
       "get-channels": "slack.getChannels",
+      get_channels: "slack.getChannels",
+      "get-channel": "slack.getChannel",
+      get_channel: "slack.getChannel",
       "send-dm": "slack.sendDirectMessage",
+      send_dm: "slack.sendDirectMessage",
       "update-message": "slack.updateMessage",
+      update_message: "slack.updateMessage",
+      "reply-in-thread": "slack.replyInThread",
+      reply_in_thread: "slack.replyInThread",
+      "get-thread-messages": "slack.getThreadMessages",
+      get_thread_messages: "slack.getThreadMessages",
+      "get-user": "slack.getUser",
+      get_user: "slack.getUser",
+      "listen-slack-events": "slack.listenSlackEvents",
+      listen_slack_events: "slack.listenSlackEvents",
+      "handle-interactions": "slack.handleInteractions",
+      handle_interactions: "slack.handleInteractions",
       "delete-message": "slack.deleteMessage",
+      delete_message: "slack.deleteMessage",
       "create-channel": "slack.createChannel",
     },
     github: {
@@ -4758,8 +5307,32 @@ export function getAvailableMethods(): {
       description: "List available Slack channels",
     },
     {
+      method: "slack.getChannel",
+      description: "Get Slack channel details by ID or name",
+    },
+    {
       method: "slack.sendDirectMessage",
       description: "Send a Slack direct message",
+    },
+    {
+      method: "slack.getUser",
+      description: "Get Slack user info by id, email, or name",
+    },
+    {
+      method: "slack.replyInThread",
+      description: "Reply to an existing Slack thread",
+    },
+    {
+      method: "slack.getThreadMessages",
+      description: "List messages in a Slack thread",
+    },
+    {
+      method: "slack.listenSlackEvents",
+      description: "Normalize Slack Events API and slash-command payloads",
+    },
+    {
+      method: "slack.handleInteractions",
+      description: "Handle Slack button/action interactions and approvals",
     },
     {
       method: "slack.postThreadReply",
