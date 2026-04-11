@@ -42,6 +42,7 @@ type GmailConfig = {
 const GMAIL_READ_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
 const GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose";
+const GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify";
 
 type GoogleServiceAccountCredentials = {
   client_email: string;
@@ -206,6 +207,24 @@ const METHOD_ALIASES: Record<string, string> = {
   gmail_draft_message: "gmail.createDraft",
   "gmail.send": "gmail.sendMessage",
   gmail_send: "gmail.sendMessage",
+  "gmail.read_email": "gmail.readEmail",
+  gmail_read_email: "gmail.readEmail",
+  "gmail.get_email": "gmail.readEmail",
+  gmail_get_email: "gmail.readEmail",
+  "gmail.search_emails": "gmail.searchEmails",
+  gmail_search_emails: "gmail.searchEmails",
+  "gmail.parse_email": "gmail.parseEmail",
+  gmail_parse_email: "gmail.parseEmail",
+  "gmail.add_label": "gmail.addLabel",
+  gmail_add_label: "gmail.addLabel",
+  "gmail.get_thread": "gmail.getThread",
+  gmail_get_thread: "gmail.getThread",
+  "gmail.reply_email": "gmail.replyEmail",
+  gmail_reply_email: "gmail.replyEmail",
+  "gmail.get_attachments": "gmail.getAttachments",
+  gmail_get_attachments: "gmail.getAttachments",
+  "gmail.listen_email_events": "gmail.listenEmailEvents",
+  gmail_listen_email_events: "gmail.listenEmailEvents",
 };
 
 const registeredGateways: Record<string, GatewayRegistration> = {
@@ -594,27 +613,173 @@ function base64UrlEncode(content: string): string {
     .replace(/=+$/g, "");
 }
 
+type GmailAttachmentInput = {
+  filename: string;
+  contentType?: string;
+  contentBase64?: string;
+  content?: string;
+  data?: string;
+};
+
 function buildGmailRawMessage(args: {
   to: string;
   subject: string;
   text?: string;
   html?: string;
+  attachments?: GmailAttachmentInput[];
+  additionalHeaders?: string[];
 }): string {
-  const contentType = args.html
+  const bodyContentType = args.html
     ? "text/html; charset=UTF-8"
     : "text/plain; charset=UTF-8";
   const body = args.html || args.text || "";
+  const attachments = Array.isArray(args.attachments)
+    ? args.attachments.filter(
+        (entry): entry is GmailAttachmentInput =>
+          !!entry &&
+          typeof entry === "object" &&
+          typeof entry.filename === "string" &&
+          entry.filename.trim().length > 0,
+      )
+    : [];
+  const extraHeaders = Array.isArray(args.additionalHeaders)
+    ? args.additionalHeaders.filter(
+        (value): value is string =>
+          typeof value === "string" && value.trim().length > 0,
+      )
+    : [];
 
-  const rawMessage = [
+  const headers = [
     "MIME-Version: 1.0",
     `To: ${args.to}`,
     `Subject: ${args.subject}`,
-    `Content-Type: ${contentType}`,
-    "",
-    body,
-  ].join("\r\n");
+    ...extraHeaders,
+  ];
+
+  let rawMessage = "";
+  if (attachments.length === 0) {
+    rawMessage = [...headers, `Content-Type: ${bodyContentType}`, "", body].join(
+      "\r\n",
+    );
+  } else {
+    const boundary = `nexusmcp_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    const lines: string[] = [
+      ...headers,
+      `Content-Type: multipart/mixed; boundary=\"${boundary}\"`,
+      "",
+      `--${boundary}`,
+      `Content-Type: ${bodyContentType}`,
+      "Content-Transfer-Encoding: 7bit",
+      "",
+      body,
+    ];
+
+    for (const attachment of attachments) {
+      const encoded = (
+        attachment.contentBase64 || attachment.data || ""
+      )
+        .trim()
+        .replace(/-/g, "+")
+        .replace(/_/g, "/");
+
+      const base64Data =
+        encoded ||
+        Buffer.from(attachment.content || "", "utf8").toString("base64");
+      const safeName = attachment.filename.replace(/\"/g, "");
+
+      lines.push(
+        `--${boundary}`,
+        `Content-Type: ${attachment.contentType || "application/octet-stream"}; name=\"${safeName}\"`,
+        "Content-Transfer-Encoding: base64",
+        `Content-Disposition: attachment; filename=\"${safeName}\"`,
+        "",
+        base64Data,
+      );
+    }
+
+    lines.push(`--${boundary}--`, "");
+    rawMessage = lines.join("\r\n");
+  }
 
   return base64UrlEncode(rawMessage);
+}
+
+function decodeBase64UrlToUtf8(value: string): string {
+  const normalized = value
+    .replace(/-/g, "+")
+    .replace(/_/g, "/")
+    .padEnd(Math.ceil(value.length / 4) * 4, "=");
+  return Buffer.from(normalized, "base64").toString("utf8");
+}
+
+function getGmailHeaderMap(headersValue: unknown): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const rawHeader of parseBodyAsList(headersValue)) {
+    const header = parseBodyAsRecord(rawHeader);
+    const name = pickString(header, ["name"]);
+    if (!name) {
+      continue;
+    }
+
+    const value = pickString(header, ["value"]) || "";
+    map[name.toLowerCase()] = value;
+  }
+  return map;
+}
+
+function extractMessageAddress(value: string): string {
+  const match = value.match(/<([^>]+)>/);
+  if (match && match[1]) {
+    return match[1].trim();
+  }
+  return value.trim();
+}
+
+function collectGmailAttachments(
+  payloadPart: JsonRecord,
+  result: JsonRecord[] = [],
+): JsonRecord[] {
+  const body = parseBodyAsRecord(payloadPart.body);
+  const filename = pickString(payloadPart, ["filename"]);
+  const attachmentId = pickString(body, ["attachmentId"]);
+
+  if (filename || attachmentId) {
+    result.push({
+      filename: filename || "attachment",
+      mimeType: pickString(payloadPart, ["mimeType"]),
+      attachmentId,
+      size:
+        typeof body.size === "number"
+          ? body.size
+          : typeof payloadPart.size === "number"
+            ? payloadPart.size
+            : undefined,
+      inlineData: pickString(body, ["data"]),
+    });
+  }
+
+  for (const child of parseBodyAsList(payloadPart.parts)) {
+    collectGmailAttachments(parseBodyAsRecord(child), result);
+  }
+
+  return result;
+}
+
+function summarizeGmailMessage(messagePayload: JsonRecord): JsonRecord {
+  const payload = parseBodyAsRecord(messagePayload.payload);
+  const headers = getGmailHeaderMap(payload.headers);
+  return {
+    id: pickString(messagePayload, ["id"]),
+    threadId: pickString(messagePayload, ["threadId"]),
+    labelIds: parseBodyAsList(messagePayload.labelIds).filter(
+      (entry): entry is string => typeof entry === "string",
+    ),
+    snippet: pickString(messagePayload, ["snippet"]),
+    internalDate: pickString(messagePayload, ["internalDate"]),
+    subject: headers.subject || "",
+    from: headers.from || "",
+    to: headers.to || "",
+  };
 }
 
 function parseGoogleServiceAccountJson(
@@ -1154,14 +1319,37 @@ async function getGmailConfig(params: JsonRecord): Promise<GmailConfig> {
 }
 
 function getGmailRequiredScopes(
-  operation: "list_messages" | "send_message" | "create_draft",
+  operation:
+    | "list_messages"
+    | "send_message"
+    | "create_draft"
+    | "read_email"
+    | "search_emails"
+    | "parse_email"
+    | "add_label"
+    | "get_thread"
+    | "reply_email"
+    | "get_attachments"
+    | "listen_email_events",
 ): string[] {
-  if (operation === "list_messages") {
+  if (
+    operation === "list_messages" ||
+    operation === "read_email" ||
+    operation === "search_emails" ||
+    operation === "parse_email" ||
+    operation === "get_thread" ||
+    operation === "get_attachments" ||
+    operation === "listen_email_events"
+  ) {
     return [GMAIL_READ_SCOPE];
   }
 
-  if (operation === "send_message") {
+  if (operation === "send_message" || operation === "reply_email") {
     return [GMAIL_SEND_SCOPE];
+  }
+
+  if (operation === "add_label") {
+    return [GMAIL_MODIFY_SCOPE];
   }
 
   return [GMAIL_COMPOSE_SCOPE];
@@ -1169,7 +1357,18 @@ function getGmailRequiredScopes(
 
 function withGmailPermissionGuidance(
   error: unknown,
-  operation: "list_messages" | "send_message" | "create_draft",
+  operation:
+    | "list_messages"
+    | "send_message"
+    | "create_draft"
+    | "read_email"
+    | "search_emails"
+    | "parse_email"
+    | "add_label"
+    | "get_thread"
+    | "reply_email"
+    | "get_attachments"
+    | "listen_email_events",
 ): Error {
   const message =
     error instanceof Error ? error.message : "Unknown Gmail request error";
@@ -1226,6 +1425,49 @@ async function gmailApiRequest(
   }
 
   return parseBodyAsRecord(payload);
+}
+
+async function gmailGetMessage(
+  config: GmailConfig,
+  messageId: string,
+  format: "metadata" | "full" = "full",
+): Promise<JsonRecord> {
+  const metadataHeaders =
+    format === "metadata"
+      ? "&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To"
+      : "";
+
+  return gmailApiRequest(
+    config,
+    "GET",
+    `/messages/${encodeURIComponent(messageId)}?format=${format}${metadataHeaders}`,
+  );
+}
+
+function decodeGmailMessageBody(payload: JsonRecord): string {
+  const body = parseBodyAsRecord(payload.body);
+  const inlineData = pickString(body, ["data"]);
+  if (inlineData) {
+    try {
+      return decodeBase64UrlToUtf8(inlineData);
+    } catch {
+      return "";
+    }
+  }
+
+  for (const partRaw of parseBodyAsList(payload.parts)) {
+    const part = parseBodyAsRecord(partRaw);
+    const mimeType = (pickString(part, ["mimeType"]) || "").toLowerCase();
+    const nestedBody = decodeGmailMessageBody(part);
+    if (nestedBody && (mimeType.includes("text/plain") || mimeType.includes("text/html"))) {
+      return nestedBody;
+    }
+    if (nestedBody) {
+      return nestedBody;
+    }
+  }
+
+  return "";
 }
 
 function resolveIssueKey(params: JsonRecord): string {
@@ -3043,6 +3285,87 @@ const handlers: Record<string, MCPHandler> = {
     };
   },
 
+  "gmail.searchEmails": async (params) => {
+    const payload = params as JsonRecord;
+    const query = pickString(payload, ["query", "q"]) || "in:inbox";
+    const result = (await handlers["gmail.listMessages"]({
+      ...payload,
+      query,
+    })) as JsonRecord;
+
+    return {
+      ...result,
+      operation: "search_emails",
+    };
+  },
+
+  "gmail.readEmail": async (params) => {
+    const payload = params as JsonRecord;
+    const config = await getGmailConfig(payload);
+    const messageId = pickString(payload, ["messageId", "id", "emailId"]);
+
+    if (!messageId) {
+      throw new Error("gmail.read_email requires messageId (or id).");
+    }
+
+    let message: JsonRecord;
+    try {
+      message = await gmailGetMessage(config, messageId, "full");
+    } catch (error) {
+      throw withGmailPermissionGuidance(error, "read_email");
+    }
+
+    const summary = summarizeGmailMessage(message);
+    const payloadData = parseBodyAsRecord(message.payload);
+    const body = decodeGmailMessageBody(payloadData);
+
+    return {
+      ...summary,
+      body,
+      rawSizeEstimate: Number(message.sizeEstimate ?? 0),
+      historyId: pickString(message, ["historyId"]),
+    };
+  },
+
+  "gmail.parseEmail": async (params) => {
+    const payload = params as JsonRecord;
+
+    let message: JsonRecord;
+    if (typeof payload.message === "object" && payload.message && !Array.isArray(payload.message)) {
+      message = parseBodyAsRecord(payload.message);
+    } else {
+      const messageId = pickString(payload, ["messageId", "id", "emailId"]);
+      if (!messageId) {
+        throw new Error(
+          "gmail.parse_email requires a message payload or messageId.",
+        );
+      }
+
+      const config = await getGmailConfig(payload);
+      try {
+        message = await gmailGetMessage(config, messageId, "full");
+      } catch (error) {
+        throw withGmailPermissionGuidance(error, "parse_email");
+      }
+    }
+
+    const summary = summarizeGmailMessage(message);
+    const messagePayload = parseBodyAsRecord(message.payload);
+    const headerMap = getGmailHeaderMap(messagePayload.headers);
+    const body = decodeGmailMessageBody(messagePayload);
+    const attachments = collectGmailAttachments(messagePayload);
+
+    return {
+      ...summary,
+      sender: headerMap.from || "",
+      recipient: headerMap.to || "",
+      subject: headerMap.subject || "",
+      body,
+      attachments,
+      parsed: true,
+    };
+  },
+
   "gmail.sendMessage": async (params) => {
     const payload = params as JsonRecord;
     const config = await getGmailConfig(payload);
@@ -3051,6 +3374,10 @@ const handlers: Record<string, MCPHandler> = {
       pickString(payload, ["subject", "title"]) || "NexusMCP Update";
     const body = pickString(payload, ["body", "text", "message"]) || "";
     const html = pickString(payload, ["html"]);
+    const threadId = pickString(payload, ["threadId", "thread_id"]);
+    const attachments = parseBodyAsList(payload.attachments).map((entry) =>
+      parseBodyAsRecord(entry),
+    ) as GmailAttachmentInput[];
 
     if (!to) {
       throw new Error("gmail.send_message requires recipient email (to).");
@@ -3060,12 +3387,14 @@ const handlers: Record<string, MCPHandler> = {
       to,
       subject,
       ...(html ? { html } : { text: body }),
+      ...(attachments.length > 0 ? { attachments } : {}),
     });
 
     let response: JsonRecord;
     try {
       response = await gmailApiRequest(config, "POST", "/messages/send", {
         raw,
+        ...(threadId ? { threadId } : {}),
       });
     } catch (error) {
       throw withGmailPermissionGuidance(error, "send_message");
@@ -3085,6 +3414,309 @@ const handlers: Record<string, MCPHandler> = {
       to,
       subject,
       accepted: true,
+    };
+  },
+
+  "gmail.replyEmail": async (params) => {
+    const payload = params as JsonRecord;
+    const config = await getGmailConfig(payload);
+    const messageId = pickString(payload, ["messageId", "id", "emailId"]);
+    const explicitThreadId = pickString(payload, ["threadId", "thread_id"]);
+    const explicitTo = pickString(payload, ["to", "recipient", "email"]);
+    const body = pickString(payload, ["body", "text", "message"]) || "";
+    const html = pickString(payload, ["html"]);
+
+    if (!explicitThreadId && !messageId) {
+      throw new Error(
+        "gmail.reply_email requires threadId or messageId to anchor the reply.",
+      );
+    }
+
+    let threadId = explicitThreadId || "";
+    let to = explicitTo || "";
+    let subject = pickString(payload, ["subject", "title"]);
+    let inReplyTo = pickString(payload, ["inReplyTo", "in_reply_to"]);
+    let references = pickString(payload, ["references"]);
+
+    if (messageId) {
+      let original: JsonRecord;
+      try {
+        original = await gmailGetMessage(config, messageId, "full");
+      } catch (error) {
+        throw withGmailPermissionGuidance(error, "reply_email");
+      }
+
+      const originalPayload = parseBodyAsRecord(original.payload);
+      const headers = getGmailHeaderMap(originalPayload.headers);
+      threadId = threadId || pickString(original, ["threadId"]) || "";
+
+      if (!to && headers.from) {
+        to = extractMessageAddress(headers.from);
+      }
+
+      if (!subject) {
+        const source = headers.subject || "";
+        subject = /^re:/i.test(source) ? source : `Re: ${source || "Message"}`;
+      }
+
+      inReplyTo = inReplyTo || headers["message-id"] || "";
+      references = references || headers.references || inReplyTo || "";
+    }
+
+    if (!to) {
+      throw new Error("gmail.reply_email could not resolve recipient address.");
+    }
+
+    if (!threadId) {
+      throw new Error("gmail.reply_email requires threadId.");
+    }
+
+    const additionalHeaders: string[] = [];
+    if (inReplyTo) {
+      additionalHeaders.push(`In-Reply-To: ${inReplyTo}`);
+    }
+    if (references) {
+      additionalHeaders.push(`References: ${references}`);
+    }
+
+    const raw = buildGmailRawMessage({
+      to,
+      subject: subject || "Re: Message",
+      ...(html ? { html } : { text: body }),
+      ...(additionalHeaders.length > 0 ? { additionalHeaders } : {}),
+    });
+
+    let response: JsonRecord;
+    try {
+      response = await gmailApiRequest(config, "POST", "/messages/send", {
+        raw,
+        threadId,
+      });
+    } catch (error) {
+      throw withGmailPermissionGuidance(error, "reply_email");
+    }
+
+    return {
+      id: response.id,
+      threadId: response.threadId || threadId,
+      to,
+      subject: subject || "Re: Message",
+      replied: true,
+    };
+  },
+
+  "gmail.addLabel": async (params) => {
+    const payload = params as JsonRecord;
+    const config = await getGmailConfig(payload);
+    const messageId = pickString(payload, ["messageId", "id", "emailId"]);
+
+    if (!messageId) {
+      throw new Error("gmail.add_label requires messageId (or id).");
+    }
+
+    const addLabelIds = parseBodyAsList(payload.addLabelIds ?? payload.labels)
+      .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+      .map((entry) => entry.trim());
+    const removeLabelIds = parseBodyAsList(payload.removeLabelIds)
+      .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+      .map((entry) => entry.trim());
+
+    if (addLabelIds.length === 0 && removeLabelIds.length === 0) {
+      throw new Error(
+        "gmail.add_label requires at least one label in addLabelIds/labels/removeLabelIds.",
+      );
+    }
+
+    let response: JsonRecord;
+    try {
+      response = await gmailApiRequest(
+        config,
+        "POST",
+        `/messages/${encodeURIComponent(messageId)}/modify`,
+        {
+          addLabelIds,
+          removeLabelIds,
+        },
+      );
+    } catch (error) {
+      throw withGmailPermissionGuidance(error, "add_label");
+    }
+
+    return {
+      id: pickString(response, ["id"]) || messageId,
+      threadId: pickString(response, ["threadId"]),
+      labelIds: parseBodyAsList(response.labelIds).filter(
+        (entry): entry is string => typeof entry === "string",
+      ),
+      added: addLabelIds,
+      removed: removeLabelIds,
+    };
+  },
+
+  "gmail.getThread": async (params) => {
+    const payload = params as JsonRecord;
+    const config = await getGmailConfig(payload);
+    let threadId = pickString(payload, ["threadId", "thread_id"]);
+
+    const messageId = pickString(payload, ["messageId", "id", "emailId"]);
+    if (!threadId && messageId) {
+      const message = await gmailGetMessage(config, messageId, "metadata");
+      threadId = pickString(message, ["threadId"]);
+    }
+
+    if (!threadId) {
+      throw new Error("gmail.get_thread requires threadId or messageId.");
+    }
+
+    let response: JsonRecord;
+    try {
+      response = await gmailApiRequest(
+        config,
+        "GET",
+        `/threads/${encodeURIComponent(threadId)}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To`,
+      );
+    } catch (error) {
+      throw withGmailPermissionGuidance(error, "get_thread");
+    }
+
+    const messages = parseBodyAsList(response.messages).map((entry) =>
+      summarizeGmailMessage(parseBodyAsRecord(entry)),
+    );
+
+    return {
+      id: pickString(response, ["id"]) || threadId,
+      historyId: pickString(response, ["historyId"]),
+      messages,
+      messageCount: messages.length,
+    };
+  },
+
+  "gmail.getAttachments": async (params) => {
+    const payload = params as JsonRecord;
+    const config = await getGmailConfig(payload);
+    const messageId = pickString(payload, ["messageId", "id", "emailId"]);
+
+    if (!messageId) {
+      throw new Error("gmail.get_attachments requires messageId (or id).");
+    }
+
+    let message: JsonRecord;
+    try {
+      message = await gmailGetMessage(config, messageId, "full");
+    } catch (error) {
+      throw withGmailPermissionGuidance(error, "get_attachments");
+    }
+
+    const messagePayload = parseBodyAsRecord(message.payload);
+    const attachments = collectGmailAttachments(messagePayload);
+    const wantedAttachmentId = pickString(payload, ["attachmentId"]);
+    const wantedFilename = pickString(payload, ["filename"]);
+    const download = payload.download === true || !!wantedAttachmentId;
+
+    if (!download) {
+      return {
+        messageId,
+        count: attachments.length,
+        attachments: attachments.map((entry) => ({
+          filename: entry.filename,
+          mimeType: entry.mimeType,
+          attachmentId: entry.attachmentId,
+          size: entry.size,
+        })),
+      };
+    }
+
+    const selected = attachments.find((entry) => {
+      const idMatch = wantedAttachmentId
+        ? entry.attachmentId === wantedAttachmentId
+        : true;
+      const nameMatch = wantedFilename ? entry.filename === wantedFilename : true;
+      return idMatch && nameMatch;
+    });
+
+    if (!selected || !selected.attachmentId) {
+      throw new Error(
+        "Attachment not found. Provide a valid attachmentId/filename from gmail.get_attachments list result.",
+      );
+    }
+
+    const attachmentData = await gmailApiRequest(
+      config,
+      "GET",
+      `/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(String(selected.attachmentId))}`,
+    );
+
+    return {
+      messageId,
+      attachmentId: selected.attachmentId,
+      filename: selected.filename,
+      mimeType: selected.mimeType,
+      size: selected.size,
+      data: pickString(attachmentData, ["data"]),
+    };
+  },
+
+  "gmail.listenEmailEvents": async (params) => {
+    const payload = params as JsonRecord;
+    const config = await getGmailConfig(payload);
+    const maxResultsRaw = Number(payload.maxResults ?? payload.max_results ?? 20);
+    const maxResults = Number.isFinite(maxResultsRaw)
+      ? Math.max(1, Math.min(100, maxResultsRaw))
+      : 20;
+
+    const startHistoryId = pickString(payload, [
+      "startHistoryId",
+      "historyId",
+      "cursor",
+    ]);
+    const labelId = pickString(payload, ["labelId"]);
+
+    if (!startHistoryId) {
+      const profile = await gmailApiRequest(config, "GET", "/profile");
+      return {
+        listening: true,
+        mode: "poll_history",
+        startHistoryId: pickString(profile, ["historyId"]),
+        hint:
+          "Call gmail.listen_email_events again with startHistoryId to fetch mailbox changes.",
+      };
+    }
+
+    const query = new URLSearchParams({
+      startHistoryId,
+      maxResults: String(maxResults),
+      ...(labelId ? { labelId } : {}),
+    });
+
+    let response: JsonRecord;
+    try {
+      response = await gmailApiRequest(config, "GET", `/history?${query.toString()}`);
+    } catch (error) {
+      throw withGmailPermissionGuidance(error, "listen_email_events");
+    }
+
+    const history = parseBodyAsList(response.history).map((entry) => {
+      const record = parseBodyAsRecord(entry);
+      const messagesAdded = parseBodyAsList(record.messagesAdded).map((added) => {
+        const message = parseBodyAsRecord(parseBodyAsRecord(added).message);
+        return {
+          id: pickString(message, ["id"]),
+          threadId: pickString(message, ["threadId"]),
+        };
+      });
+
+      return {
+        id: pickString(record, ["id"]),
+        messagesAdded,
+      };
+    });
+
+    return {
+      listening: true,
+      mode: "poll_history",
+      history,
+      nextHistoryId: pickString(response, ["historyId"]),
+      historyCount: history.length,
     };
   },
 
@@ -4000,7 +4632,15 @@ export async function executeNode(
     },
     gmail: {
       "list-messages": "gmail.listMessages",
+      "search-emails": "gmail.searchEmails",
+      "read-email": "gmail.readEmail",
+      "parse-email": "gmail.parseEmail",
       "send-message": "gmail.sendMessage",
+      "reply-email": "gmail.replyEmail",
+      "add-label": "gmail.addLabel",
+      "get-thread": "gmail.getThread",
+      "get-attachments": "gmail.getAttachments",
+      "listen-email-events": "gmail.listenEmailEvents",
       "create-draft": "gmail.createDraft",
     },
     postgres: {
@@ -4194,8 +4834,40 @@ export function getAvailableMethods(): {
       description: "List Gmail messages",
     },
     {
+      method: "gmail.searchEmails",
+      description: "Search Gmail messages using Gmail query filters",
+    },
+    {
+      method: "gmail.readEmail",
+      description: "Read a Gmail message by ID",
+    },
+    {
+      method: "gmail.parseEmail",
+      description: "Parse a Gmail message into structured fields",
+    },
+    {
       method: "gmail.sendMessage",
       description: "Send an email through Gmail API",
+    },
+    {
+      method: "gmail.replyEmail",
+      description: "Reply to an existing Gmail thread or message",
+    },
+    {
+      method: "gmail.addLabel",
+      description: "Add or remove labels on a Gmail message",
+    },
+    {
+      method: "gmail.getThread",
+      description: "Get a Gmail thread and its message summaries",
+    },
+    {
+      method: "gmail.getAttachments",
+      description: "List or download Gmail message attachments",
+    },
+    {
+      method: "gmail.listenEmailEvents",
+      description: "Poll Gmail history API for new mailbox events",
     },
     {
       method: "gmail.createDraft",
