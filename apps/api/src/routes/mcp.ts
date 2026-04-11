@@ -25,7 +25,6 @@ function toAuditService(
   | "postgres"
   | "google_sheets"
   | "gmail"
-  | "aws"
   | "system" {
   const token = method.split(".")[0]?.toLowerCase() || "system";
 
@@ -34,7 +33,6 @@ function toAuditService(
   if (token === "slack") return "slack";
   if (token === "github") return "github";
   if (token === "gmail") return "gmail";
-  if (token === "aws") return "aws";
   if (token === "postgres" || token === "postgresql") return "postgres";
 
   return "system";

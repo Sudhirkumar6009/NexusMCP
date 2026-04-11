@@ -19,7 +19,7 @@ _Transform natural language into automated multi-service workflows_
 
 ## Overview
 
-NexusMCP is a full-stack **AI-powered workflow orchestration platform** that leverages the Model Context Protocol (MCP) to connect and automate tasks across multiple third-party services. Users describe workflows in natural language, and the platform generates executable DAG (Directed Acyclic Graph) structures that coordinate actions across Jira, Slack, GitHub, Google Sheets, Gmail, AWS, and PostgreSQL.
+NexusMCP is a full-stack **AI-powered workflow orchestration platform** that leverages the Model Context Protocol (MCP) to connect and automate tasks across multiple third-party services. Users describe workflows in natural language, and the platform generates executable DAG (Directed Acyclic Graph) structures that coordinate actions across Jira, Slack, GitHub, Google Sheets, Gmail, and PostgreSQL.
 
 ### What Makes NexusMCP Different?
 
@@ -54,7 +54,6 @@ NexusMCP is a full-stack **AI-powered workflow orchestration platform** that lev
 | **GitHub**        | Create issues, PRs, branches     |
 | **Google Sheets** | Read and append data             |
 | **Gmail**         | Send emails via OAuth            |
-| **AWS**           | STS validation, SigV4 signing    |
 | **PostgreSQL**    | Query and insert operations      |
 
 ---
@@ -90,7 +89,7 @@ NexusMCP is a full-stack **AI-powered workflow orchestration platform** that lev
                     ┌──────────▼──────────┐
                     │   External APIs     │
                     │ Jira, Slack, GitHub │
-                    │  Sheets, Gmail, AWS │
+                    │    Sheets, Gmail    │
                     └─────────────────────┘
 ```
 
@@ -383,10 +382,6 @@ GOOGLE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
 # Gmail (OAuth-based, tokens stored per user)
 # Configured via /auth/google/gmail flow
 
-# AWS
-AWS_ACCESS_KEY_ID=AKIA...
-AWS_SECRET_ACCESS_KEY=your-secret-key
-AWS_REGION=us-east-1
 ```
 
 ---

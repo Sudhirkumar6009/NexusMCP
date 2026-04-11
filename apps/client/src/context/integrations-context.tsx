@@ -179,20 +179,38 @@ const initialIntegrations: Integration[] = [
     enabled: false,
     tools: [
       {
-        name: "read_sheet",
-        description: "Read rows from a spreadsheet",
+        name: "add_row",
+        description: "Add a new structured row to a spreadsheet",
         inputSchema: {},
         requiresApproval: false,
       },
       {
-        name: "append_rows",
-        description: "Append rows to a spreadsheet",
+        name: "get_rows",
+        description: "Get rows from a spreadsheet",
         inputSchema: {},
         requiresApproval: false,
       },
       {
-        name: "update_cells",
-        description: "Update specific sheet ranges",
+        name: "update_row",
+        description: "Update a spreadsheet row",
+        inputSchema: {},
+        requiresApproval: false,
+      },
+      {
+        name: "delete_row",
+        description: "Delete a spreadsheet row",
+        inputSchema: {},
+        requiresApproval: false,
+      },
+      {
+        name: "query_rows",
+        description: "Query rows using filters",
+        inputSchema: {},
+        requiresApproval: false,
+      },
+      {
+        name: "list_sheets",
+        description: "List available sheets/tabs",
         inputSchema: {},
         requiresApproval: false,
       },
@@ -231,38 +249,6 @@ const initialIntegrations: Integration[] = [
     ],
     config: {
       channelId: "support@company.com",
-    },
-  },
-  {
-    id: "aws",
-    name: "AWS",
-    description: "Cloud infrastructure and service control",
-    category: "devops",
-    icon: "Cloud",
-    status: "disconnected",
-    enabled: false,
-    tools: [
-      {
-        name: "list_resources",
-        description: "List selected cloud resources",
-        inputSchema: {},
-        requiresApproval: false,
-      },
-      {
-        name: "invoke_lambda",
-        description: "Invoke Lambda function",
-        inputSchema: {},
-        requiresApproval: true,
-      },
-      {
-        name: "describe_stack",
-        description: "Inspect CloudFormation stack state",
-        inputSchema: {},
-        requiresApproval: false,
-      },
-    ],
-    config: {
-      orgName: "aws-account",
     },
   },
 ];
@@ -412,7 +398,6 @@ export function IntegrationsProvider({
       github: "github",
       google_sheets: "google_sheets",
       gmail: "gmail",
-      aws: "aws",
     };
 
     const merged = initialIntegrations.map((integration) => {

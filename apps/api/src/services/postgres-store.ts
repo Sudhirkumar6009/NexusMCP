@@ -414,7 +414,6 @@ export async function getEventLogStats(): Promise<{
       postgres: 0,
       google_sheets: 0,
       gmail: 0,
-      aws: 0,
       system: 0,
     },
     last24Hours: 0,

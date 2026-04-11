@@ -53,7 +53,6 @@ class FlowManager:
             "sheet",
         ],
         "gmail": ["gmail", "google mail", "google_mail", "mail", "email"],
-        "aws": ["aws", "amazon web services", "amazon_web_services"],
     }
 
     def __init__(self, settings: Settings):

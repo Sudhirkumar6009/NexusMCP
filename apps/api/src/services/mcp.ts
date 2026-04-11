@@ -34,6 +34,11 @@ type SlackConfig = {
   token: string;
 };
 
+type SlackMessageDispatchOptions = {
+  tokenCandidates: string[];
+  webhookUrl?: string;
+};
+
 type GmailConfig = {
   accessToken: string;
   refreshToken?: string;
@@ -42,6 +47,7 @@ type GmailConfig = {
 const GMAIL_READ_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
 const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
 const GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose";
+const GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify";
 
 type GoogleServiceAccountCredentials = {
   client_email: string;
@@ -175,15 +181,36 @@ const METHOD_ALIASES: Record<string, string> = {
   "google_sheets.append_rows": "sheets.appendRow",
   "google_sheets.append_row": "sheets.appendRow",
   "google_sheets.insert_row": "sheets.appendRow",
+  "google_sheets.add_row": "sheets.addRow",
+  google_sheets_add_row: "sheets.addRow",
   "sheets.append_row": "sheets.appendRow",
   sheets_append_row: "sheets.appendRow",
   "sheets.insert_row": "sheets.appendRow",
+  "sheets.add_row": "sheets.addRow",
+  sheets_add_row: "sheets.addRow",
+  "google_sheets.get_rows": "sheets.getRows",
+  google_sheets_get_rows: "sheets.getRows",
+  "sheets.get_rows": "sheets.getRows",
+  sheets_get_rows: "sheets.getRows",
   "google_sheets.update_cells": "sheets.updateCells",
-  "google_sheets.update_row": "sheets.updateCells",
+  "google_sheets.update_row": "sheets.updateRow",
+  google_sheets_update_row: "sheets.updateRow",
   "sheets.update_cells": "sheets.updateCells",
   sheets_update_cells: "sheets.updateCells",
-  "sheets.update_row": "sheets.updateCells",
-  sheets_update_row: "sheets.updateCells",
+  "sheets.update_row": "sheets.updateRow",
+  sheets_update_row: "sheets.updateRow",
+  "google_sheets.delete_row": "sheets.deleteRow",
+  google_sheets_delete_row: "sheets.deleteRow",
+  "sheets.delete_row": "sheets.deleteRow",
+  sheets_delete_row: "sheets.deleteRow",
+  "google_sheets.query_rows": "sheets.queryRows",
+  google_sheets_query_rows: "sheets.queryRows",
+  "sheets.query_rows": "sheets.queryRows",
+  sheets_query_rows: "sheets.queryRows",
+  "google_sheets.list_sheets": "sheets.listSheets",
+  google_sheets_list_sheets: "sheets.listSheets",
+  "sheets.list_sheets": "sheets.listSheets",
+  sheets_list_sheets: "sheets.listSheets",
   "sheets.append_rows": "sheets.appendRow",
   sheets_append_rows: "sheets.appendRow",
   "sheets.write_cells": "sheets.updateCells",
@@ -206,6 +233,24 @@ const METHOD_ALIASES: Record<string, string> = {
   gmail_draft_message: "gmail.createDraft",
   "gmail.send": "gmail.sendMessage",
   gmail_send: "gmail.sendMessage",
+  "gmail.read_email": "gmail.readEmail",
+  gmail_read_email: "gmail.readEmail",
+  "gmail.get_email": "gmail.readEmail",
+  gmail_get_email: "gmail.readEmail",
+  "gmail.search_emails": "gmail.searchEmails",
+  gmail_search_emails: "gmail.searchEmails",
+  "gmail.parse_email": "gmail.parseEmail",
+  gmail_parse_email: "gmail.parseEmail",
+  "gmail.add_label": "gmail.addLabel",
+  gmail_add_label: "gmail.addLabel",
+  "gmail.get_thread": "gmail.getThread",
+  gmail_get_thread: "gmail.getThread",
+  "gmail.reply_email": "gmail.replyEmail",
+  gmail_reply_email: "gmail.replyEmail",
+  "gmail.get_attachments": "gmail.getAttachments",
+  gmail_get_attachments: "gmail.getAttachments",
+  "gmail.listen_email_events": "gmail.listenEmailEvents",
+  gmail_listen_email_events: "gmail.listenEmailEvents",
 };
 
 const registeredGateways: Record<string, GatewayRegistration> = {
@@ -270,6 +315,52 @@ function parseJsonLikePayload(value: unknown): JsonRecord {
 function parseIssueKeyFromPrompt(prompt: string): string | undefined {
   const match = prompt.match(/\b([A-Z][A-Z0-9]+-\d+)\b/);
   return match?.[1];
+}
+
+function parseIssueKeysFromPrompt(prompt: string): string[] {
+  const collected: string[] = [];
+  const seen = new Set<string>();
+
+  const directMatches = prompt.match(/\b([A-Z][A-Z0-9]+-\d+)\b/g) || [];
+  for (const issueKey of directMatches) {
+    const normalized = issueKey.toUpperCase();
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      collected.push(normalized);
+    }
+  }
+
+  const rangePattern =
+    /\b([A-Z][A-Z0-9]+)-(\d+)\s*(?:to|-)\s*(?:([A-Z][A-Z0-9]+)-)?(\d+)\b/i;
+  const rangeMatch = prompt.match(rangePattern);
+  if (rangeMatch) {
+    const startPrefix = (rangeMatch[1] || "").toUpperCase();
+    const startRaw = Number(rangeMatch[2]);
+    const endPrefix = (rangeMatch[3] || startPrefix).toUpperCase();
+    const endRaw = Number(rangeMatch[4]);
+
+    if (
+      startPrefix &&
+      endPrefix &&
+      startPrefix === endPrefix &&
+      Number.isFinite(startRaw) &&
+      Number.isFinite(endRaw)
+    ) {
+      const start = Math.floor(Math.min(startRaw, endRaw));
+      const end = Math.floor(Math.max(startRaw, endRaw));
+      if (end - start <= 200) {
+        for (let value = start; value <= end; value += 1) {
+          const key = `${startPrefix}-${value}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            collected.push(key);
+          }
+        }
+      }
+    }
+  }
+
+  return collected;
 }
 
 function parseRepoFromPrompt(prompt: string): string | undefined {
@@ -448,6 +539,58 @@ function isPlaceholderValue(raw: string | undefined): boolean {
   return false;
 }
 
+function extractSpreadsheetIdFromText(
+  raw: string | undefined,
+): string | undefined {
+  if (!raw) {
+    return undefined;
+  }
+
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const directUrlMatch = trimmed.match(
+    /\/spreadsheets\/d\/([A-Za-z0-9_-]{20,})/i,
+  );
+  if (directUrlMatch?.[1]) {
+    return directUrlMatch[1];
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return undefined;
+  }
+
+  return trimmed;
+}
+
+function isLikelySpreadsheetId(raw: string | undefined): boolean {
+  if (!raw) {
+    return false;
+  }
+
+  const candidate = raw.trim();
+  if (!candidate || isPlaceholderValue(candidate)) {
+    return false;
+  }
+
+  if (!/^[A-Za-z0-9_-]+$/.test(candidate)) {
+    return false;
+  }
+
+  if (candidate.length < 20) {
+    return false;
+  }
+
+  // Reject issue/branch-like identifiers such as KAN-9-fix-readme-line-20.
+  if (/^[A-Z][A-Z0-9]+-\d+(?:-|$)/.test(candidate)) {
+    return false;
+  }
+
+  return true;
+}
+
 async function parseResponseBody(response: Awaited<ReturnType<typeof fetch>>) {
   const raw = await response.text();
   if (!raw) {
@@ -594,27 +737,174 @@ function base64UrlEncode(content: string): string {
     .replace(/=+$/g, "");
 }
 
+type GmailAttachmentInput = {
+  filename: string;
+  contentType?: string;
+  contentBase64?: string;
+  content?: string;
+  data?: string;
+};
+
 function buildGmailRawMessage(args: {
   to: string;
   subject: string;
   text?: string;
   html?: string;
+  attachments?: GmailAttachmentInput[];
+  additionalHeaders?: string[];
 }): string {
-  const contentType = args.html
+  const bodyContentType = args.html
     ? "text/html; charset=UTF-8"
     : "text/plain; charset=UTF-8";
   const body = args.html || args.text || "";
+  const attachments = Array.isArray(args.attachments)
+    ? args.attachments.filter(
+        (entry): entry is GmailAttachmentInput =>
+          !!entry &&
+          typeof entry === "object" &&
+          typeof entry.filename === "string" &&
+          entry.filename.trim().length > 0,
+      )
+    : [];
+  const extraHeaders = Array.isArray(args.additionalHeaders)
+    ? args.additionalHeaders.filter(
+        (value): value is string =>
+          typeof value === "string" && value.trim().length > 0,
+      )
+    : [];
 
-  const rawMessage = [
+  const headers = [
     "MIME-Version: 1.0",
     `To: ${args.to}`,
     `Subject: ${args.subject}`,
-    `Content-Type: ${contentType}`,
-    "",
-    body,
-  ].join("\r\n");
+    ...extraHeaders,
+  ];
+
+  let rawMessage = "";
+  if (attachments.length === 0) {
+    rawMessage = [
+      ...headers,
+      `Content-Type: ${bodyContentType}`,
+      "",
+      body,
+    ].join("\r\n");
+  } else {
+    const boundary = `nexusmcp_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    const lines: string[] = [
+      ...headers,
+      `Content-Type: multipart/mixed; boundary=\"${boundary}\"`,
+      "",
+      `--${boundary}`,
+      `Content-Type: ${bodyContentType}`,
+      "Content-Transfer-Encoding: 7bit",
+      "",
+      body,
+    ];
+
+    for (const attachment of attachments) {
+      const encoded = (attachment.contentBase64 || attachment.data || "")
+        .trim()
+        .replace(/-/g, "+")
+        .replace(/_/g, "/");
+
+      const base64Data =
+        encoded ||
+        Buffer.from(attachment.content || "", "utf8").toString("base64");
+      const safeName = attachment.filename.replace(/\"/g, "");
+
+      lines.push(
+        `--${boundary}`,
+        `Content-Type: ${attachment.contentType || "application/octet-stream"}; name=\"${safeName}\"`,
+        "Content-Transfer-Encoding: base64",
+        `Content-Disposition: attachment; filename=\"${safeName}\"`,
+        "",
+        base64Data,
+      );
+    }
+
+    lines.push(`--${boundary}--`, "");
+    rawMessage = lines.join("\r\n");
+  }
 
   return base64UrlEncode(rawMessage);
+}
+
+function decodeBase64UrlToUtf8(value: string): string {
+  const normalized = value
+    .replace(/-/g, "+")
+    .replace(/_/g, "/")
+    .padEnd(Math.ceil(value.length / 4) * 4, "=");
+  return Buffer.from(normalized, "base64").toString("utf8");
+}
+
+function getGmailHeaderMap(headersValue: unknown): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const rawHeader of parseBodyAsList(headersValue)) {
+    const header = parseBodyAsRecord(rawHeader);
+    const name = pickString(header, ["name"]);
+    if (!name) {
+      continue;
+    }
+
+    const value = pickString(header, ["value"]) || "";
+    map[name.toLowerCase()] = value;
+  }
+  return map;
+}
+
+function extractMessageAddress(value: string): string {
+  const match = value.match(/<([^>]+)>/);
+  if (match && match[1]) {
+    return match[1].trim();
+  }
+  return value.trim();
+}
+
+function collectGmailAttachments(
+  payloadPart: JsonRecord,
+  result: JsonRecord[] = [],
+): JsonRecord[] {
+  const body = parseBodyAsRecord(payloadPart.body);
+  const filename = pickString(payloadPart, ["filename"]);
+  const attachmentId = pickString(body, ["attachmentId"]);
+
+  if (filename || attachmentId) {
+    result.push({
+      filename: filename || "attachment",
+      mimeType: pickString(payloadPart, ["mimeType"]),
+      attachmentId,
+      size:
+        typeof body.size === "number"
+          ? body.size
+          : typeof payloadPart.size === "number"
+            ? payloadPart.size
+            : undefined,
+      inlineData: pickString(body, ["data"]),
+    });
+  }
+
+  for (const child of parseBodyAsList(payloadPart.parts)) {
+    collectGmailAttachments(parseBodyAsRecord(child), result);
+  }
+
+  return result;
+}
+
+function summarizeGmailMessage(messagePayload: JsonRecord): JsonRecord {
+  const payload = parseBodyAsRecord(messagePayload.payload);
+  const headers = getGmailHeaderMap(payload.headers);
+  return {
+    id: pickString(messagePayload, ["id"]),
+    threadId: pickString(messagePayload, ["threadId"]),
+    labelIds: parseBodyAsList(messagePayload.labelIds).filter(
+      (entry): entry is string => typeof entry === "string",
+    ),
+    snippet: pickString(messagePayload, ["snippet"]),
+    internalDate: pickString(messagePayload, ["internalDate"]),
+    subject: headers.subject || "",
+    from: headers.from || "",
+    to: headers.to || "",
+  };
 }
 
 function parseGoogleServiceAccountJson(
@@ -815,6 +1105,65 @@ function getSlackConfig(params: JsonRecord): SlackConfig {
   return { token };
 }
 
+function getSlackMessageDispatchOptions(
+  params: JsonRecord,
+): SlackMessageDispatchOptions {
+  const integration = getConnectedIntegration("slack");
+  const credentials = asRecord(integration.credentials);
+
+  const tokenCandidates = [
+    pickString(params, ["accessToken", "apiKey", "token"]),
+    pickString(credentials, ["accessToken", "apiKey", "token"]),
+    typeof process.env.SLACK_BOT_TOKEN === "string"
+      ? process.env.SLACK_BOT_TOKEN.trim()
+      : undefined,
+    typeof process.env.SLACK_TOKEN === "string"
+      ? process.env.SLACK_TOKEN.trim()
+      : undefined,
+  ]
+    .filter((value): value is string => Boolean(value && value.trim()))
+    .map((value) => value.trim());
+
+  const dedupedTokens = Array.from(new Set(tokenCandidates));
+
+  const webhookUrl =
+    pickString(params, ["webhookUrl", "webhook_url"]) ||
+    pickString(credentials, ["webhookUrl", "webhook_url"]) ||
+    (typeof process.env.SLACK_WEBHOOK_URL === "string"
+      ? process.env.SLACK_WEBHOOK_URL.trim()
+      : undefined);
+
+  return {
+    tokenCandidates: dedupedTokens,
+    ...(webhookUrl ? { webhookUrl } : {}),
+  };
+}
+
+async function slackIncomingWebhookRequest(
+  webhookUrl: string,
+  payload: JsonRecord,
+): Promise<void> {
+  const response = await fetch(webhookUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const body = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `Slack incoming webhook failed (${response.status}): ${body || response.statusText || "Unknown Slack webhook error"}`,
+    );
+  }
+
+  const normalizedBody = body.trim().toLowerCase();
+  if (normalizedBody && normalizedBody !== "ok") {
+    throw new Error(`Slack incoming webhook failed: ${body}`);
+  }
+}
+
 async function slackApiRequest(
   config: SlackConfig,
   method: string,
@@ -880,18 +1229,36 @@ async function resolveSlackChannelId(
   }
 
   const normalizedName = trimmed.replace(/^#/, "").toLowerCase();
-  const listPayload = await slackApiRequest(
-    config,
-    "conversations.list",
-    {
-      limit: 1000,
-      types: "public_channel,private_channel,mpim,im",
-      exclude_archived: true,
-    },
-    { httpMethod: "GET" },
-  );
+  let channels: unknown[] = [];
+  try {
+    const listPayload = await slackApiRequest(
+      config,
+      "conversations.list",
+      {
+        limit: 1000,
+        types: "public_channel,private_channel,mpim,im",
+        exclude_archived: true,
+      },
+      { httpMethod: "GET" },
+    );
+    channels = parseBodyAsList(listPayload.channels);
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message.toLowerCase() : String(error);
 
-  const channels = parseBodyAsList(listPayload.channels);
+    // Some Slack token types cannot call conversations.list. In this case,
+    // continue with the user-provided channel instead of failing send_message.
+    if (
+      message.includes("not_allowed_token_type") ||
+      message.includes("missing_scope") ||
+      message.includes("method_not_supported_for_token_type")
+    ) {
+      return trimmed;
+    }
+
+    throw error;
+  }
+
   const matched = channels.find((entry) => {
     const channel = parseBodyAsRecord(entry);
     const id = pickString(channel, ["id"]);
@@ -904,11 +1271,11 @@ async function resolveSlackChannelId(
   });
 
   if (!matched) {
-    return trimmed.replace(/^#/, "");
+    return trimmed;
   }
 
   const matchedChannel = parseBodyAsRecord(matched);
-  return pickString(matchedChannel, ["id"]) || trimmed.replace(/^#/, "");
+  return pickString(matchedChannel, ["id"]) || trimmed;
 }
 
 async function resolveSlackUserId(
@@ -974,26 +1341,50 @@ async function getSheetsConfig(params: JsonRecord): Promise<SheetsConfig> {
   const integration = getConnectedIntegration("google_sheets");
   const credentials = asRecord(integration.credentials);
 
-  const spreadsheetId = (
-    pickString(params, [
-      "sheet_id",
-      "spreadsheetId",
-      "spreadsheet_id",
-      "sheetId",
-    ]) ||
-    pickString(credentials, [
-      "sheet_id",
-      "spreadsheetId",
-      "spreadsheet_id",
-      "sheetId",
-      "spreadsheetId",
-    ]) ||
-    process.env.GOOGLE_SHEETS_SPREADSHEET_ID ||
-    process.env.SPREADSHEET_ID ||
-    ""
-  ).trim();
+  const promptText = pickString(params, ["prompt", "input"]);
+
+  const spreadsheetIdCandidates = [
+    extractSpreadsheetIdFromText(
+      pickString(params, [
+        "sheet_id",
+        "spreadsheetId",
+        "spreadsheet_id",
+        "sheetId",
+        "spreadsheetUrl",
+        "spreadsheet_url",
+      ]),
+    ),
+    extractSpreadsheetIdFromText(
+      pickString(credentials, [
+        "sheet_id",
+        "spreadsheetId",
+        "spreadsheet_id",
+        "sheetId",
+        "spreadsheetUrl",
+        "spreadsheet_url",
+      ]),
+    ),
+    extractSpreadsheetIdFromText(promptText),
+    extractSpreadsheetIdFromText(process.env.GOOGLE_SHEETS_SPREADSHEET_ID),
+    extractSpreadsheetIdFromText(process.env.SPREADSHEET_ID),
+  ].filter((value): value is string => Boolean(value && value.trim()));
+
+  const spreadsheetId =
+    spreadsheetIdCandidates.find((candidate) =>
+      isLikelySpreadsheetId(candidate),
+    ) || "";
 
   if (!spreadsheetId) {
+    const fallbackCandidate = spreadsheetIdCandidates.find(
+      (candidate) => !isPlaceholderValue(candidate),
+    );
+
+    if (fallbackCandidate) {
+      throw new Error(
+        `Google Sheets spreadsheet ID looks invalid ('${fallbackCandidate}'). Provide a real spreadsheet ID or a Google Sheets URL containing /spreadsheets/d/{id}.`,
+      );
+    }
+
     throw new Error(
       "Google Sheets spreadsheet ID is required. Provide spreadsheetId or configure SPREADSHEET_ID/GOOGLE_SHEETS_SPREADSHEET_ID.",
     );
@@ -1102,6 +1493,24 @@ function normalizeSheetValues(input: unknown): unknown[][] {
   return [input];
 }
 
+function hasMeaningfulSheetValues(values: unknown[][]): boolean {
+  return values.some((row) =>
+    Array.isArray(row)
+      ? row.some((cell) => {
+          if (cell === null || cell === undefined) {
+            return false;
+          }
+
+          if (typeof cell === "string") {
+            return cell.trim().length > 0;
+          }
+
+          return true;
+        })
+      : false,
+  );
+}
+
 function toSheetColumnName(columnNumber: number): string {
   if (!Number.isFinite(columnNumber) || columnNumber <= 0) {
     return "A";
@@ -1154,14 +1563,37 @@ async function getGmailConfig(params: JsonRecord): Promise<GmailConfig> {
 }
 
 function getGmailRequiredScopes(
-  operation: "list_messages" | "send_message" | "create_draft",
+  operation:
+    | "list_messages"
+    | "send_message"
+    | "create_draft"
+    | "read_email"
+    | "search_emails"
+    | "parse_email"
+    | "add_label"
+    | "get_thread"
+    | "reply_email"
+    | "get_attachments"
+    | "listen_email_events",
 ): string[] {
-  if (operation === "list_messages") {
+  if (
+    operation === "list_messages" ||
+    operation === "read_email" ||
+    operation === "search_emails" ||
+    operation === "parse_email" ||
+    operation === "get_thread" ||
+    operation === "get_attachments" ||
+    operation === "listen_email_events"
+  ) {
     return [GMAIL_READ_SCOPE];
   }
 
-  if (operation === "send_message") {
+  if (operation === "send_message" || operation === "reply_email") {
     return [GMAIL_SEND_SCOPE];
+  }
+
+  if (operation === "add_label") {
+    return [GMAIL_MODIFY_SCOPE];
   }
 
   return [GMAIL_COMPOSE_SCOPE];
@@ -1169,7 +1601,18 @@ function getGmailRequiredScopes(
 
 function withGmailPermissionGuidance(
   error: unknown,
-  operation: "list_messages" | "send_message" | "create_draft",
+  operation:
+    | "list_messages"
+    | "send_message"
+    | "create_draft"
+    | "read_email"
+    | "search_emails"
+    | "parse_email"
+    | "add_label"
+    | "get_thread"
+    | "reply_email"
+    | "get_attachments"
+    | "listen_email_events",
 ): Error {
   const message =
     error instanceof Error ? error.message : "Unknown Gmail request error";
@@ -1226,6 +1669,52 @@ async function gmailApiRequest(
   }
 
   return parseBodyAsRecord(payload);
+}
+
+async function gmailGetMessage(
+  config: GmailConfig,
+  messageId: string,
+  format: "metadata" | "full" = "full",
+): Promise<JsonRecord> {
+  const metadataHeaders =
+    format === "metadata"
+      ? "&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To"
+      : "";
+
+  return gmailApiRequest(
+    config,
+    "GET",
+    `/messages/${encodeURIComponent(messageId)}?format=${format}${metadataHeaders}`,
+  );
+}
+
+function decodeGmailMessageBody(payload: JsonRecord): string {
+  const body = parseBodyAsRecord(payload.body);
+  const inlineData = pickString(body, ["data"]);
+  if (inlineData) {
+    try {
+      return decodeBase64UrlToUtf8(inlineData);
+    } catch {
+      return "";
+    }
+  }
+
+  for (const partRaw of parseBodyAsList(payload.parts)) {
+    const part = parseBodyAsRecord(partRaw);
+    const mimeType = (pickString(part, ["mimeType"]) || "").toLowerCase();
+    const nestedBody = decodeGmailMessageBody(part);
+    if (
+      nestedBody &&
+      (mimeType.includes("text/plain") || mimeType.includes("text/html"))
+    ) {
+      return nestedBody;
+    }
+    if (nestedBody) {
+      return nestedBody;
+    }
+  }
+
+  return "";
 }
 
 function resolveIssueKey(params: JsonRecord): string {
@@ -2124,7 +2613,7 @@ const handlers: Record<string, MCPHandler> = {
   // Slack methods
   "slack.sendMessage": async (params) => {
     const payload = params as JsonRecord;
-    const config = getSlackConfig(payload);
+    const dispatchOptions = getSlackMessageDispatchOptions(payload);
     const text =
       pickString(payload, ["text", "message", "body"]) || "NexusMCP update";
     const channelInput = pickString(payload, ["channel", "channel_id", "to"]);
@@ -2132,35 +2621,171 @@ const handlers: Record<string, MCPHandler> = {
       throw new Error("Slack channel is required.");
     }
 
-    const channel = await resolveSlackChannelId(config, channelInput);
+    if (
+      dispatchOptions.tokenCandidates.length === 0 &&
+      !dispatchOptions.webhookUrl
+    ) {
+      throw new Error(
+        "Slack credentials are missing. Connect Slack with a bot token (chat:write) or configure SLACK_WEBHOOK_URL.",
+      );
+    }
+
     const blocks = Array.isArray(payload.blocks) ? payload.blocks : undefined;
     const attachments = Array.isArray(payload.attachments)
       ? payload.attachments
       : undefined;
     const threadTs = pickString(payload, ["thread_ts", "threadTs"]);
 
-    const result = await slackApiRequest(config, "chat.postMessage", {
-      channel,
-      text,
-      ...(blocks ? { blocks } : {}),
-      ...(attachments ? { attachments } : {}),
-      ...(threadTs ? { thread_ts: threadTs } : {}),
-    });
+    const rawChannelInput = channelInput.trim();
+    let deliveredChannel: string | null = null;
+    let dispatchedVia: "chat.postMessage" | "incoming_webhook" | null = null;
+    let lastError: unknown = null;
 
-    dataStore.addLog({
-      level: "info",
-      service: "slack",
-      action: "send_message",
-      message: `Sent Slack message to ${channel}`,
-      details: { channel, textPreview: text.slice(0, 80) },
-    });
+    for (const token of dispatchOptions.tokenCandidates) {
+      const config: SlackConfig = { token };
+      let resolvedChannel = rawChannelInput;
 
-    return {
-      ok: true,
-      ts: result.ts,
-      channel: result.channel,
-      message: result.message,
-    };
+      try {
+        resolvedChannel = await resolveSlackChannelId(config, rawChannelInput);
+      } catch (error) {
+        lastError = error;
+        continue;
+      }
+
+      const channelCandidates = Array.from(
+        new Set(
+          [
+            resolvedChannel,
+            rawChannelInput,
+            rawChannelInput.startsWith("#")
+              ? rawChannelInput.replace(/^#+/, "")
+              : `#${rawChannelInput}`,
+          ].filter((value): value is string => Boolean(value && value.trim())),
+        ),
+      );
+
+      for (const candidate of channelCandidates) {
+        try {
+          const result = await slackApiRequest(config, "chat.postMessage", {
+            channel: candidate,
+            text,
+            ...(blocks ? { blocks } : {}),
+            ...(attachments ? { attachments } : {}),
+            ...(threadTs ? { thread_ts: threadTs } : {}),
+          });
+
+          deliveredChannel = String(result.channel || candidate);
+          dispatchedVia = "chat.postMessage";
+
+          dataStore.addLog({
+            level: "info",
+            service: "slack",
+            action: "send_message",
+            message: `Sent Slack message to ${deliveredChannel}`,
+            details: {
+              channel: deliveredChannel,
+              requestedChannel: rawChannelInput,
+              dispatch: "chat.postMessage",
+              textPreview: text.slice(0, 80),
+            },
+          });
+
+          return {
+            ok: true,
+            ts: result.ts,
+            channel: result.channel,
+            message: result.message,
+            dispatch: "chat.postMessage",
+          };
+        } catch (error) {
+          lastError = error;
+          const message =
+            error instanceof Error
+              ? error.message.toLowerCase()
+              : String(error);
+
+          if (message.includes("channel_not_found")) {
+            continue;
+          }
+
+          if (
+            message.includes("not_allowed_token_type") ||
+            message.includes("invalid_auth") ||
+            message.includes("missing_scope")
+          ) {
+            break;
+          }
+
+          throw error;
+        }
+      }
+    }
+
+    if (dispatchOptions.webhookUrl) {
+      const webhookPayload: JsonRecord = {
+        text,
+        ...(blocks ? { blocks } : {}),
+        ...(attachments ? { attachments } : {}),
+      };
+
+      if (!threadTs) {
+        webhookPayload.channel = rawChannelInput;
+      }
+
+      await slackIncomingWebhookRequest(
+        dispatchOptions.webhookUrl,
+        webhookPayload,
+      );
+
+      deliveredChannel = rawChannelInput;
+      dispatchedVia = "incoming_webhook";
+
+      dataStore.addLog({
+        level: "info",
+        service: "slack",
+        action: "send_message",
+        message: `Sent Slack message to ${deliveredChannel} via incoming webhook`,
+        details: {
+          channel: deliveredChannel,
+          requestedChannel: rawChannelInput,
+          dispatch: "incoming_webhook",
+          textPreview: text.slice(0, 80),
+        },
+      });
+
+      return {
+        ok: true,
+        channel: deliveredChannel,
+        message: {
+          text,
+          dispatched_via: "incoming_webhook",
+        },
+        dispatch: "incoming_webhook",
+      };
+    }
+
+    const defaultError =
+      lastError instanceof Error
+        ? lastError
+        : new Error(
+            "Slack chat.postMessage failed for all token/channel attempts.",
+          );
+
+    if (/not_allowed_token_type/i.test(defaultError.message)) {
+      throw new Error(
+        `${defaultError.message}. Use a Slack bot token (xoxb with chat:write) or configure SLACK_WEBHOOK_URL as fallback.`,
+      );
+    }
+
+    if (deliveredChannel || dispatchedVia) {
+      return {
+        ok: true,
+        channel: deliveredChannel,
+        dispatch: dispatchedVia,
+      };
+    }
+
+    throw defaultError;
   },
 
   "slack.getChannels": async (params) => {
@@ -2235,7 +2860,9 @@ const handlers: Record<string, MCPHandler> = {
       topic: pickString(parseBodyAsRecord(details.topic), ["value"]),
       purpose: pickString(parseBodyAsRecord(details.purpose), ["value"]),
       num_members:
-        typeof details.num_members === "number" ? details.num_members : undefined,
+        typeof details.num_members === "number"
+          ? details.num_members
+          : undefined,
     };
   },
 
@@ -2351,7 +2978,11 @@ const handlers: Record<string, MCPHandler> = {
       ? payload.attachments
       : undefined;
 
-    const explicitChannel = pickString(payload, ["channel", "channel_id", "group"]);
+    const explicitChannel = pickString(payload, [
+      "channel",
+      "channel_id",
+      "group",
+    ]);
     const recipients = parseBodyAsList(payload.users ?? payload.recipients)
       .map((entry) => String(entry).trim())
       .filter(Boolean);
@@ -2449,18 +3080,20 @@ const handlers: Record<string, MCPHandler> = {
     };
   },
 
-  "slack.postThreadReply": async (params) => {
+  "slack.replyInThread": async (params) => {
     const payload = params as JsonRecord;
     const config = getSlackConfig(payload);
     const channelInput = pickString(payload, ["channel", "channel_id"]);
     const threadTs = pickString(payload, ["thread_ts", "threadTs", "ts"]);
     const text =
       pickString(payload, ["text", "message", "body"]) || "Thread reply";
+    const blocks = Array.isArray(payload.blocks) ? payload.blocks : undefined;
+    const attachments = Array.isArray(payload.attachments)
+      ? payload.attachments
+      : undefined;
 
     if (!channelInput || !threadTs) {
-      throw new Error(
-        "slack.post_thread_reply requires channel and thread_ts.",
-      );
+      throw new Error("slack.reply_in_thread requires channel and thread_ts.");
     }
 
     const channel = await resolveSlackChannelId(config, channelInput);
@@ -2468,6 +3101,16 @@ const handlers: Record<string, MCPHandler> = {
       channel,
       thread_ts: threadTs,
       text,
+      ...(blocks ? { blocks } : {}),
+      ...(attachments ? { attachments } : {}),
+    });
+
+    dataStore.addLog({
+      level: "info",
+      service: "slack",
+      action: "reply_in_thread",
+      message: `Posted reply in Slack thread ${threadTs}`,
+      details: { channel, threadTs },
     });
 
     return {
@@ -2475,6 +3118,204 @@ const handlers: Record<string, MCPHandler> = {
       channel: reply.channel,
       ts: reply.ts,
       thread_ts: threadTs,
+    };
+  },
+
+  "slack.postThreadReply": async (params) => {
+    const payload = params as JsonRecord;
+    return handlers["slack.replyInThread"](payload);
+  },
+
+  "slack.getThreadMessages": async (params) => {
+    const payload = params as JsonRecord;
+    const config = getSlackConfig(payload);
+    const channelInput = pickString(payload, ["channel", "channel_id"]);
+    const threadTs = pickString(payload, ["thread_ts", "threadTs", "ts"]);
+    const limitRaw = Number(payload.limit ?? 50);
+    const limit = Number.isFinite(limitRaw)
+      ? Math.max(1, Math.min(200, Math.floor(limitRaw)))
+      : 50;
+
+    if (!channelInput || !threadTs) {
+      throw new Error(
+        "slack.get_thread_messages requires channel and thread_ts.",
+      );
+    }
+
+    const channel = await resolveSlackChannelId(config, channelInput);
+    const replies = await slackApiRequest(
+      config,
+      "conversations.replies",
+      { channel, ts: threadTs, limit },
+      { httpMethod: "GET" },
+    );
+
+    const messages = parseBodyAsList(replies.messages).map((entry) => {
+      const message = parseBodyAsRecord(entry);
+      return {
+        user: pickString(message, ["user"]),
+        text: pickString(message, ["text"]),
+        ts: pickString(message, ["ts"]),
+        thread_ts: pickString(message, ["thread_ts"]),
+        bot_id: pickString(message, ["bot_id"]),
+      };
+    });
+
+    return {
+      channel,
+      thread_ts: threadTs,
+      messages,
+      count: messages.length,
+    };
+  },
+
+  "slack.listenSlackEvents": async (params) => {
+    const payload = params as JsonRecord;
+    const requestedEventTypes = parseBodyAsList(
+      payload.event_types ?? payload.eventTypes,
+    )
+      .map((entry) => String(entry).trim().toLowerCase())
+      .filter(Boolean);
+
+    const eventTypes =
+      requestedEventTypes.length > 0
+        ? requestedEventTypes
+        : ["message", "mention", "slash_command"];
+
+    const endpoint =
+      pickString(payload, ["endpoint", "webhook", "path"]) ||
+      process.env.SLACK_EVENTS_ENDPOINT ||
+      "/api/integrations/slack/events";
+
+    const incoming = parseJsonLikePayload(
+      payload.payload ?? payload.body ?? payload.event,
+    );
+
+    if (Object.keys(incoming).length === 0) {
+      return {
+        listening: false,
+        mode: "configuration",
+        endpoint,
+        event_types: eventTypes,
+        signing_secret_configured: Boolean(process.env.SLACK_SIGNING_SECRET),
+        note: "Pass payload/body to normalize incoming Slack Events API or slash-command payloads.",
+      };
+    }
+
+    const envelopeType = pickString(incoming, ["type"]);
+    if (envelopeType === "url_verification") {
+      return {
+        listening: true,
+        acknowledged: true,
+        challenge: pickString(incoming, ["challenge"]),
+      };
+    }
+
+    const event = parseBodyAsRecord(incoming.event);
+    const slashCommand = pickString(incoming, ["command"]);
+    const eventType = pickString(event, ["type"]);
+
+    let normalizedEventType = "other";
+    if (slashCommand) {
+      normalizedEventType = "slash_command";
+    } else if (eventType === "app_mention") {
+      normalizedEventType = "mention";
+    } else if (eventType === "message") {
+      normalizedEventType = "message";
+    }
+
+    const shouldTrigger = eventTypes.includes(normalizedEventType);
+
+    const normalizedPayload = {
+      event_type: normalizedEventType,
+      slack_event_type: eventType || slashCommand || envelopeType,
+      command: slashCommand,
+      text: pickString(event, ["text"]) || pickString(incoming, ["text"]),
+      user: pickString(event, ["user"]) || pickString(incoming, ["user_id"]),
+      channel:
+        pickString(event, ["channel"]) || pickString(incoming, ["channel_id"]),
+      ts: pickString(event, ["ts"]) || pickString(incoming, ["trigger_id"]),
+    };
+
+    dataStore.addLog({
+      level: "info",
+      service: "slack",
+      action: "listen_slack_events",
+      message: `Processed Slack event ${normalizedPayload.event_type}`,
+      details: {
+        shouldTrigger,
+        eventType: normalizedPayload.slack_event_type,
+      },
+    });
+
+    return {
+      listening: true,
+      acknowledged: true,
+      should_trigger_workflow: shouldTrigger,
+      subscribed_event_types: eventTypes,
+      event: normalizedPayload,
+    };
+  },
+
+  "slack.handleInteractions": async (params) => {
+    const payload = params as JsonRecord;
+    const incoming = parseJsonLikePayload(
+      payload.payload ?? payload.body ?? payload.interaction,
+    );
+
+    if (Object.keys(incoming).length === 0) {
+      throw new Error(
+        "slack.handle_interactions requires payload/body with Slack interaction data.",
+      );
+    }
+
+    const interactionType = pickString(incoming, ["type"]) || "unknown";
+    const user = parseBodyAsRecord(incoming.user);
+    const channel = parseBodyAsRecord(incoming.channel);
+    const actions = parseBodyAsList(incoming.actions);
+    const firstAction = parseBodyAsRecord(actions[0]);
+
+    const actionId =
+      pickString(firstAction, ["action_id"]) ||
+      pickString(firstAction, ["name"]) ||
+      pickString(incoming, ["callback_id"]) ||
+      "unknown";
+    const actionValue = pickString(firstAction, ["value", "text", "name"]);
+
+    const decision =
+      /approve/i.test(actionId) || /approve/i.test(actionValue || "")
+        ? "approved"
+        : /reject|deny/i.test(actionId) ||
+            /reject|deny/i.test(actionValue || "")
+          ? "rejected"
+          : "handled";
+
+    dataStore.addLog({
+      level: "info",
+      service: "slack",
+      action: "handle_interactions",
+      message: `Handled Slack interaction ${actionId}`,
+      details: {
+        interactionType,
+        decision,
+        user: pickString(user, ["id", "username"]),
+      },
+    });
+
+    return {
+      handled: true,
+      interaction_type: interactionType,
+      action_id: actionId,
+      decision,
+      user: {
+        id: pickString(user, ["id"]),
+        username: pickString(user, ["username"]),
+      },
+      channel: {
+        id: pickString(channel, ["id"]),
+        name: pickString(channel, ["name"]),
+      },
+      response_url: pickString(incoming, ["response_url"]),
     };
   },
 
@@ -2835,6 +3676,37 @@ const handlers: Record<string, MCPHandler> = {
   },
 
   // Google Sheets methods
+  "sheets.listSheets": async (params) => {
+    const payload = params as JsonRecord;
+    const config = await getSheetsConfig(payload);
+
+    const response = await sheetsApiRequest(
+      config,
+      "GET",
+      "?fields=spreadsheetId,spreadsheetUrl,sheets(properties(sheetId,title,index,gridProperties(rowCount,columnCount)))",
+    );
+
+    const sheets = parseBodyAsList(response.sheets).map((entry) => {
+      const sheet = parseBodyAsRecord(entry);
+      const properties = parseBodyAsRecord(sheet.properties);
+      const grid = parseBodyAsRecord(properties.gridProperties);
+      return {
+        id: Number(properties.sheetId ?? 0),
+        title: pickString(properties, ["title"]) || "",
+        index: Number(properties.index ?? 0),
+        rowCount: Number(grid.rowCount ?? 0),
+        columnCount: Number(grid.columnCount ?? 0),
+      };
+    });
+
+    return {
+      sheet_id: config.spreadsheetId,
+      spreadsheet_url: pickString(response, ["spreadsheetUrl"]),
+      sheets,
+      count: sheets.length,
+    };
+  },
+
   "sheets.readRange": async (params) => {
     const payload = params as JsonRecord;
     const config = await getSheetsConfig(payload);
@@ -2859,6 +3731,33 @@ const handlers: Record<string, MCPHandler> = {
       range: pickString(response, ["range"]) || range,
       values: parseBodyAsList(response.values),
       majorDimension: pickString(response, ["majorDimension"]),
+    };
+  },
+
+  "sheets.getRows": async (params) => {
+    const payload = params as JsonRecord;
+    const sheetName =
+      pickString(payload, ["sheet_name", "sheet", "tab"]) || "Sheet1";
+    const range = pickString(payload, ["range"]) || `${sheetName}!A1:ZZ1000`;
+
+    const readResult = asRecord(
+      await handlers["sheets.readRange"]({
+        ...payload,
+        range,
+      }),
+    );
+
+    const values = parseBodyAsList(readResult.values).map((entry) =>
+      Array.isArray(entry) ? entry : [entry],
+    );
+    const headers =
+      values.length > 0 && Array.isArray(values[0]) ? values[0] : [];
+
+    return {
+      ...readResult,
+      headers,
+      rows: values.slice(1),
+      rowCount: Math.max(0, values.length - 1),
     };
   },
 
@@ -2908,13 +3807,99 @@ const handlers: Record<string, MCPHandler> = {
     };
   },
 
+  "sheets.addRow": async (params) => {
+    const payload = params as JsonRecord;
+    const rowInput =
+      payload.row ?? payload.row_data ?? payload.values ?? payload.data;
+    const uniqueByRaw = payload.unique_by ?? payload.uniqueBy;
+
+    const rowRecord = asRecord(rowInput);
+    if (Object.keys(rowRecord).length > 0 && !Array.isArray(rowInput)) {
+      const sheetName =
+        pickString(payload, ["sheet_name", "sheet", "tab"]) || "Sheet1";
+
+      const uniqueBy = Array.isArray(uniqueByRaw)
+        ? uniqueByRaw
+            .map((entry) => String(entry).trim())
+            .filter((entry) => entry.length > 0)
+        : typeof uniqueByRaw === "string" && uniqueByRaw.trim().length > 0
+          ? [uniqueByRaw.trim()]
+          : [];
+
+      if (uniqueBy.length > 0) {
+        const filters = uniqueBy.reduce<JsonRecord>((acc, key) => {
+          if (rowRecord[key] !== undefined && rowRecord[key] !== null) {
+            acc[key] = rowRecord[key];
+          }
+          return acc;
+        }, {});
+
+        if (Object.keys(filters).length > 0) {
+          const existing = asRecord(
+            await handlers["sheets.queryRows"]({
+              ...payload,
+              sheet_name: sheetName,
+              filters,
+              limit: 1,
+            }),
+          );
+
+          if (Number(existing.count ?? 0) > 0) {
+            return {
+              skipped: true,
+              reason: "duplicate",
+              sheet_id: existing.sheet_id,
+              sheet_name: sheetName,
+              filters,
+            };
+          }
+        }
+      }
+
+      const headerRange = `${sheetName}!1:1`;
+      const headerRead = asRecord(
+        await handlers["sheets.readRange"]({
+          ...payload,
+          range: headerRange,
+        }),
+      );
+      const headerRows = parseBodyAsList(headerRead.values);
+      const headers =
+        headerRows.length > 0 && Array.isArray(headerRows[0])
+          ? (headerRows[0] as unknown[])
+          : [];
+
+      const mappedRow =
+        headers.length > 0
+          ? headers.map((header) => {
+              const key = String(header ?? "").trim();
+              return key ? (rowRecord[key] ?? "") : "";
+            })
+          : Object.values(rowRecord);
+
+      return handlers["sheets.appendRow"]({
+        ...payload,
+        row_data: [mappedRow],
+      });
+    }
+
+    return handlers["sheets.appendRow"]({
+      ...payload,
+      row_data: rowInput,
+    });
+  },
+
   "sheets.updateCells": async (params) => {
     const payload = params as JsonRecord;
     const config = await getSheetsConfig(payload);
 
-    const values = normalizeSheetValues(
+    let values = normalizeSheetValues(
       payload.values ?? payload.row_data ?? payload.value ?? "",
     );
+
+    const sheetName =
+      pickString(payload, ["sheet_name", "sheet", "tab"]) || "Sheet1";
+    const prompt = pickString(payload, ["prompt", "input"]) || "";
 
     let range = pickString(payload, ["range"]);
     if (!range) {
@@ -2927,8 +3912,6 @@ const handlers: Record<string, MCPHandler> = {
           payload.column_number ??
           payload.columnIndex,
       );
-      const sheetName =
-        pickString(payload, ["sheet_name", "sheet", "tab"]) || "Sheet1";
 
       if (Number.isFinite(rowRaw) && Number.isFinite(columnRaw)) {
         const row = Math.max(1, Math.floor(rowRaw));
@@ -2941,8 +3924,37 @@ const handlers: Record<string, MCPHandler> = {
     }
 
     if (!range) {
+      // If range is missing but prompt clearly asks to add entries, infer rows
+      // and append them instead of failing hard.
+      if (!hasMeaningfulSheetValues(values)) {
+        const issueKeys = parseIssueKeysFromPrompt(prompt);
+        if (issueKeys.length > 0) {
+          const generatedAt = new Date().toISOString();
+          values = issueKeys.map((issueKey) => [
+            issueKey,
+            "Latest details",
+            generatedAt,
+          ]);
+        }
+      }
+
+      if (hasMeaningfulSheetValues(values)) {
+        const appendResult = await handlers["sheets.appendRow"]({
+          ...payload,
+          sheet_name: sheetName,
+          values,
+          range: `${sheetName}!A:ZZ`,
+        });
+
+        return {
+          ...(asRecord(appendResult) as JsonRecord),
+          mode: "append_fallback",
+          reason: "range_missing",
+        };
+      }
+
       throw new Error(
-        "sheets.update_cells requires range, or row+column coordinates.",
+        "sheets.update_cells requires range, or row+column coordinates. Provide range/coordinates, or include non-empty values.",
       );
     }
 
@@ -2972,6 +3984,264 @@ const handlers: Record<string, MCPHandler> = {
       updatedRows: Number(response.updatedRows ?? 0),
       updatedColumns: Number(response.updatedColumns ?? 0),
       updatedCells: Number(response.updatedCells ?? 0),
+    };
+  },
+
+  "sheets.updateRow": async (params) => {
+    const payload = params as JsonRecord;
+    const explicitRange = pickString(payload, ["range"]);
+
+    if (explicitRange) {
+      return handlers["sheets.updateCells"](payload);
+    }
+
+    const sheetName =
+      pickString(payload, ["sheet_name", "sheet", "tab"]) || "Sheet1";
+    const rowIndexRaw = Number(
+      payload.row_index ??
+        payload.row ??
+        payload.row_number ??
+        payload.rowNumber,
+    );
+
+    if (!Number.isFinite(rowIndexRaw) || rowIndexRaw <= 0) {
+      throw new Error(
+        "sheets.update_row requires row_index (or row/row_number) when range is not provided.",
+      );
+    }
+
+    let values = normalizeSheetValues(
+      payload.values ??
+        payload.row_data ??
+        payload.value ??
+        payload.row_data ??
+        [],
+    );
+
+    const rowRecord = asRecord(
+      payload.row_data ?? payload.row_values ?? payload.row,
+    );
+    if (Object.keys(rowRecord).length > 0 && !Array.isArray(payload.row_data)) {
+      const headerRead = asRecord(
+        await handlers["sheets.readRange"]({
+          ...payload,
+          range: `${sheetName}!1:1`,
+        }),
+      );
+      const headerRows = parseBodyAsList(headerRead.values);
+      const headers =
+        headerRows.length > 0 && Array.isArray(headerRows[0])
+          ? (headerRows[0] as unknown[])
+          : [];
+
+      if (headers.length > 0) {
+        values = [
+          headers.map((header) => {
+            const key = String(header ?? "").trim();
+            return key ? (rowRecord[key] ?? "") : "";
+          }),
+        ];
+      }
+    }
+
+    const width = Math.max(1, values[0]?.length || 1);
+    const startColumn = Number(payload.column ?? payload.column_index ?? 1);
+    const startColName = toSheetColumnName(
+      Number.isFinite(startColumn) && startColumn > 0
+        ? Math.floor(startColumn)
+        : 1,
+    );
+    const endColName = toSheetColumnName(
+      (Number.isFinite(startColumn) && startColumn > 0
+        ? Math.floor(startColumn)
+        : 1) +
+        width -
+        1,
+    );
+
+    return handlers["sheets.updateCells"]({
+      ...payload,
+      range: `${sheetName}!${startColName}${Math.floor(rowIndexRaw)}:${endColName}${Math.floor(rowIndexRaw)}`,
+      values,
+    });
+  },
+
+  "sheets.deleteRow": async (params) => {
+    const payload = params as JsonRecord;
+    const config = await getSheetsConfig(payload);
+    const sheetName =
+      pickString(payload, ["sheet_name", "sheet", "tab"]) || "Sheet1";
+    const rowIndexRaw = Number(
+      payload.row_index ??
+        payload.row ??
+        payload.row_number ??
+        payload.rowNumber,
+    );
+
+    if (!Number.isFinite(rowIndexRaw) || rowIndexRaw <= 0) {
+      throw new Error(
+        "sheets.delete_row requires row_index (or row/row_number) greater than 0.",
+      );
+    }
+
+    const metadata = await sheetsApiRequest(config, "GET", "");
+    const sheets = parseBodyAsList(metadata.sheets);
+    const target = sheets
+      .map((entry) => parseBodyAsRecord(entry))
+      .find((entry) => {
+        const properties = parseBodyAsRecord(entry.properties);
+        return pickString(properties, ["title"]) === sheetName;
+      });
+
+    if (!target) {
+      throw new Error(`Sheet '${sheetName}' was not found in spreadsheet.`);
+    }
+
+    const properties = parseBodyAsRecord(target.properties);
+    const sheetId = Number(properties.sheetId ?? NaN);
+    if (!Number.isFinite(sheetId)) {
+      throw new Error(`Sheet '${sheetName}' is missing a valid sheetId.`);
+    }
+
+    const startIndex = Math.floor(rowIndexRaw) - 1;
+    const endIndex = startIndex + 1;
+
+    await sheetsApiRequest(
+      config,
+      "POST",
+      ":batchUpdate",
+      {
+        requests: [
+          {
+            deleteDimension: {
+              range: {
+                sheetId,
+                dimension: "ROWS",
+                startIndex,
+                endIndex,
+              },
+            },
+          },
+        ],
+      },
+      { writeOperation: true },
+    );
+
+    return {
+      sheet_id: config.spreadsheetId,
+      sheet_name: sheetName,
+      deleted_row_index: Math.floor(rowIndexRaw),
+      ok: true,
+    };
+  },
+
+  "sheets.queryRows": async (params) => {
+    const payload = params as JsonRecord;
+    const sheetName =
+      pickString(payload, ["sheet_name", "sheet", "tab"]) || "Sheet1";
+    const range = pickString(payload, ["range"]) || `${sheetName}!A1:ZZ1000`;
+    const queryText =
+      pickString(payload, ["query", "search", "contains"]) || "";
+    const column = pickString(payload, ["column", "field", "header"]);
+    const value = pickString(payload, ["value", "equals", "match"]);
+    const operator = (
+      pickString(payload, ["operator", "op"]) || "equals"
+    ).toLowerCase();
+    const filters = asRecord(payload.filters);
+    const limitRaw = Number(
+      payload.limit ?? payload.max_rows ?? payload.maxResults ?? 100,
+    );
+    const limit = Number.isFinite(limitRaw)
+      ? Math.max(1, Math.min(5000, Math.floor(limitRaw)))
+      : 100;
+
+    const readResult = asRecord(
+      await handlers["sheets.readRange"]({
+        ...payload,
+        range,
+      }),
+    );
+
+    const values = parseBodyAsList(readResult.values).map((entry) =>
+      Array.isArray(entry) ? entry : [entry],
+    );
+    const headerRow =
+      values.length > 0 && Array.isArray(values[0]) ? values[0] : [];
+    const headers = headerRow.map((header, index) => {
+      const text = String(header ?? "").trim();
+      return text || `column_${index + 1}`;
+    });
+
+    const dataRows = values.slice(1).map((row, rowOffset) => {
+      const rowRecord: JsonRecord = {
+        _rowIndex: rowOffset + 2,
+      };
+      headers.forEach((header, index) => {
+        rowRecord[header] = (row as unknown[])[index] ?? "";
+      });
+      return rowRecord;
+    });
+
+    const normalizedQuery = queryText.trim().toLowerCase();
+
+    const matched = dataRows.filter((row) => {
+      if (normalizedQuery) {
+        const haystack = Object.values(row)
+          .map((item) => String(item ?? ""))
+          .join(" ")
+          .toLowerCase();
+        if (!haystack.includes(normalizedQuery)) {
+          return false;
+        }
+      }
+
+      if (column && value !== undefined) {
+        const current = String(row[column] ?? "");
+        const expected = String(value);
+        const currentLower = current.toLowerCase();
+        const expectedLower = expected.toLowerCase();
+
+        if (operator === "contains" && !currentLower.includes(expectedLower)) {
+          return false;
+        }
+
+        if (
+          operator === "starts_with" &&
+          !currentLower.startsWith(expectedLower)
+        ) {
+          return false;
+        }
+
+        if (operator === "not_equals" && currentLower === expectedLower) {
+          return false;
+        }
+
+        if (
+          (operator === "equals" || operator === "eq") &&
+          currentLower !== expectedLower
+        ) {
+          return false;
+        }
+      }
+
+      for (const [filterKey, filterValue] of Object.entries(filters)) {
+        const rowValue = String(row[filterKey] ?? "").toLowerCase();
+        const expected = String(filterValue ?? "").toLowerCase();
+        if (rowValue !== expected) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+
+    return {
+      sheet_id: readResult.sheet_id,
+      range: readResult.range,
+      headers,
+      rows: matched.slice(0, limit),
+      count: matched.length,
+      returned: Math.min(matched.length, limit),
     };
   },
 
@@ -3043,6 +4313,91 @@ const handlers: Record<string, MCPHandler> = {
     };
   },
 
+  "gmail.searchEmails": async (params) => {
+    const payload = params as JsonRecord;
+    const query = pickString(payload, ["query", "q"]) || "in:inbox";
+    const result = (await handlers["gmail.listMessages"]({
+      ...payload,
+      query,
+    })) as JsonRecord;
+
+    return {
+      ...result,
+      operation: "search_emails",
+    };
+  },
+
+  "gmail.readEmail": async (params) => {
+    const payload = params as JsonRecord;
+    const config = await getGmailConfig(payload);
+    const messageId = pickString(payload, ["messageId", "id", "emailId"]);
+
+    if (!messageId) {
+      throw new Error("gmail.read_email requires messageId (or id).");
+    }
+
+    let message: JsonRecord;
+    try {
+      message = await gmailGetMessage(config, messageId, "full");
+    } catch (error) {
+      throw withGmailPermissionGuidance(error, "read_email");
+    }
+
+    const summary = summarizeGmailMessage(message);
+    const payloadData = parseBodyAsRecord(message.payload);
+    const body = decodeGmailMessageBody(payloadData);
+
+    return {
+      ...summary,
+      body,
+      rawSizeEstimate: Number(message.sizeEstimate ?? 0),
+      historyId: pickString(message, ["historyId"]),
+    };
+  },
+
+  "gmail.parseEmail": async (params) => {
+    const payload = params as JsonRecord;
+
+    let message: JsonRecord;
+    if (
+      typeof payload.message === "object" &&
+      payload.message &&
+      !Array.isArray(payload.message)
+    ) {
+      message = parseBodyAsRecord(payload.message);
+    } else {
+      const messageId = pickString(payload, ["messageId", "id", "emailId"]);
+      if (!messageId) {
+        throw new Error(
+          "gmail.parse_email requires a message payload or messageId.",
+        );
+      }
+
+      const config = await getGmailConfig(payload);
+      try {
+        message = await gmailGetMessage(config, messageId, "full");
+      } catch (error) {
+        throw withGmailPermissionGuidance(error, "parse_email");
+      }
+    }
+
+    const summary = summarizeGmailMessage(message);
+    const messagePayload = parseBodyAsRecord(message.payload);
+    const headerMap = getGmailHeaderMap(messagePayload.headers);
+    const body = decodeGmailMessageBody(messagePayload);
+    const attachments = collectGmailAttachments(messagePayload);
+
+    return {
+      ...summary,
+      sender: headerMap.from || "",
+      recipient: headerMap.to || "",
+      subject: headerMap.subject || "",
+      body,
+      attachments,
+      parsed: true,
+    };
+  },
+
   "gmail.sendMessage": async (params) => {
     const payload = params as JsonRecord;
     const config = await getGmailConfig(payload);
@@ -3051,6 +4406,10 @@ const handlers: Record<string, MCPHandler> = {
       pickString(payload, ["subject", "title"]) || "NexusMCP Update";
     const body = pickString(payload, ["body", "text", "message"]) || "";
     const html = pickString(payload, ["html"]);
+    const threadId = pickString(payload, ["threadId", "thread_id"]);
+    const attachments = parseBodyAsList(payload.attachments).map((entry) =>
+      parseBodyAsRecord(entry),
+    ) as GmailAttachmentInput[];
 
     if (!to) {
       throw new Error("gmail.send_message requires recipient email (to).");
@@ -3060,12 +4419,14 @@ const handlers: Record<string, MCPHandler> = {
       to,
       subject,
       ...(html ? { html } : { text: body }),
+      ...(attachments.length > 0 ? { attachments } : {}),
     });
 
     let response: JsonRecord;
     try {
       response = await gmailApiRequest(config, "POST", "/messages/send", {
         raw,
+        ...(threadId ? { threadId } : {}),
       });
     } catch (error) {
       throw withGmailPermissionGuidance(error, "send_message");
@@ -3085,6 +4446,324 @@ const handlers: Record<string, MCPHandler> = {
       to,
       subject,
       accepted: true,
+    };
+  },
+
+  "gmail.replyEmail": async (params) => {
+    const payload = params as JsonRecord;
+    const config = await getGmailConfig(payload);
+    const messageId = pickString(payload, ["messageId", "id", "emailId"]);
+    const explicitThreadId = pickString(payload, ["threadId", "thread_id"]);
+    const explicitTo = pickString(payload, ["to", "recipient", "email"]);
+    const body = pickString(payload, ["body", "text", "message"]) || "";
+    const html = pickString(payload, ["html"]);
+
+    if (!explicitThreadId && !messageId) {
+      throw new Error(
+        "gmail.reply_email requires threadId or messageId to anchor the reply.",
+      );
+    }
+
+    let threadId = explicitThreadId || "";
+    let to = explicitTo || "";
+    let subject = pickString(payload, ["subject", "title"]);
+    let inReplyTo = pickString(payload, ["inReplyTo", "in_reply_to"]);
+    let references = pickString(payload, ["references"]);
+
+    if (messageId) {
+      let original: JsonRecord;
+      try {
+        original = await gmailGetMessage(config, messageId, "full");
+      } catch (error) {
+        throw withGmailPermissionGuidance(error, "reply_email");
+      }
+
+      const originalPayload = parseBodyAsRecord(original.payload);
+      const headers = getGmailHeaderMap(originalPayload.headers);
+      threadId = threadId || pickString(original, ["threadId"]) || "";
+
+      if (!to && headers.from) {
+        to = extractMessageAddress(headers.from);
+      }
+
+      if (!subject) {
+        const source = headers.subject || "";
+        subject = /^re:/i.test(source) ? source : `Re: ${source || "Message"}`;
+      }
+
+      inReplyTo = inReplyTo || headers["message-id"] || "";
+      references = references || headers.references || inReplyTo || "";
+    }
+
+    if (!to) {
+      throw new Error("gmail.reply_email could not resolve recipient address.");
+    }
+
+    if (!threadId) {
+      throw new Error("gmail.reply_email requires threadId.");
+    }
+
+    const additionalHeaders: string[] = [];
+    if (inReplyTo) {
+      additionalHeaders.push(`In-Reply-To: ${inReplyTo}`);
+    }
+    if (references) {
+      additionalHeaders.push(`References: ${references}`);
+    }
+
+    const raw = buildGmailRawMessage({
+      to,
+      subject: subject || "Re: Message",
+      ...(html ? { html } : { text: body }),
+      ...(additionalHeaders.length > 0 ? { additionalHeaders } : {}),
+    });
+
+    let response: JsonRecord;
+    try {
+      response = await gmailApiRequest(config, "POST", "/messages/send", {
+        raw,
+        threadId,
+      });
+    } catch (error) {
+      throw withGmailPermissionGuidance(error, "reply_email");
+    }
+
+    return {
+      id: response.id,
+      threadId: response.threadId || threadId,
+      to,
+      subject: subject || "Re: Message",
+      replied: true,
+    };
+  },
+
+  "gmail.addLabel": async (params) => {
+    const payload = params as JsonRecord;
+    const config = await getGmailConfig(payload);
+    const messageId = pickString(payload, ["messageId", "id", "emailId"]);
+
+    if (!messageId) {
+      throw new Error("gmail.add_label requires messageId (or id).");
+    }
+
+    const addLabelIds = parseBodyAsList(payload.addLabelIds ?? payload.labels)
+      .filter(
+        (entry): entry is string =>
+          typeof entry === "string" && entry.trim().length > 0,
+      )
+      .map((entry) => entry.trim());
+    const removeLabelIds = parseBodyAsList(payload.removeLabelIds)
+      .filter(
+        (entry): entry is string =>
+          typeof entry === "string" && entry.trim().length > 0,
+      )
+      .map((entry) => entry.trim());
+
+    if (addLabelIds.length === 0 && removeLabelIds.length === 0) {
+      throw new Error(
+        "gmail.add_label requires at least one label in addLabelIds/labels/removeLabelIds.",
+      );
+    }
+
+    let response: JsonRecord;
+    try {
+      response = await gmailApiRequest(
+        config,
+        "POST",
+        `/messages/${encodeURIComponent(messageId)}/modify`,
+        {
+          addLabelIds,
+          removeLabelIds,
+        },
+      );
+    } catch (error) {
+      throw withGmailPermissionGuidance(error, "add_label");
+    }
+
+    return {
+      id: pickString(response, ["id"]) || messageId,
+      threadId: pickString(response, ["threadId"]),
+      labelIds: parseBodyAsList(response.labelIds).filter(
+        (entry): entry is string => typeof entry === "string",
+      ),
+      added: addLabelIds,
+      removed: removeLabelIds,
+    };
+  },
+
+  "gmail.getThread": async (params) => {
+    const payload = params as JsonRecord;
+    const config = await getGmailConfig(payload);
+    let threadId = pickString(payload, ["threadId", "thread_id"]);
+
+    const messageId = pickString(payload, ["messageId", "id", "emailId"]);
+    if (!threadId && messageId) {
+      const message = await gmailGetMessage(config, messageId, "metadata");
+      threadId = pickString(message, ["threadId"]);
+    }
+
+    if (!threadId) {
+      throw new Error("gmail.get_thread requires threadId or messageId.");
+    }
+
+    let response: JsonRecord;
+    try {
+      response = await gmailApiRequest(
+        config,
+        "GET",
+        `/threads/${encodeURIComponent(threadId)}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To`,
+      );
+    } catch (error) {
+      throw withGmailPermissionGuidance(error, "get_thread");
+    }
+
+    const messages = parseBodyAsList(response.messages).map((entry) =>
+      summarizeGmailMessage(parseBodyAsRecord(entry)),
+    );
+
+    return {
+      id: pickString(response, ["id"]) || threadId,
+      historyId: pickString(response, ["historyId"]),
+      messages,
+      messageCount: messages.length,
+    };
+  },
+
+  "gmail.getAttachments": async (params) => {
+    const payload = params as JsonRecord;
+    const config = await getGmailConfig(payload);
+    const messageId = pickString(payload, ["messageId", "id", "emailId"]);
+
+    if (!messageId) {
+      throw new Error("gmail.get_attachments requires messageId (or id).");
+    }
+
+    let message: JsonRecord;
+    try {
+      message = await gmailGetMessage(config, messageId, "full");
+    } catch (error) {
+      throw withGmailPermissionGuidance(error, "get_attachments");
+    }
+
+    const messagePayload = parseBodyAsRecord(message.payload);
+    const attachments = collectGmailAttachments(messagePayload);
+    const wantedAttachmentId = pickString(payload, ["attachmentId"]);
+    const wantedFilename = pickString(payload, ["filename"]);
+    const download = payload.download === true || !!wantedAttachmentId;
+
+    if (!download) {
+      return {
+        messageId,
+        count: attachments.length,
+        attachments: attachments.map((entry) => ({
+          filename: entry.filename,
+          mimeType: entry.mimeType,
+          attachmentId: entry.attachmentId,
+          size: entry.size,
+        })),
+      };
+    }
+
+    const selected = attachments.find((entry) => {
+      const idMatch = wantedAttachmentId
+        ? entry.attachmentId === wantedAttachmentId
+        : true;
+      const nameMatch = wantedFilename
+        ? entry.filename === wantedFilename
+        : true;
+      return idMatch && nameMatch;
+    });
+
+    if (!selected || !selected.attachmentId) {
+      throw new Error(
+        "Attachment not found. Provide a valid attachmentId/filename from gmail.get_attachments list result.",
+      );
+    }
+
+    const attachmentData = await gmailApiRequest(
+      config,
+      "GET",
+      `/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(String(selected.attachmentId))}`,
+    );
+
+    return {
+      messageId,
+      attachmentId: selected.attachmentId,
+      filename: selected.filename,
+      mimeType: selected.mimeType,
+      size: selected.size,
+      data: pickString(attachmentData, ["data"]),
+    };
+  },
+
+  "gmail.listenEmailEvents": async (params) => {
+    const payload = params as JsonRecord;
+    const config = await getGmailConfig(payload);
+    const maxResultsRaw = Number(
+      payload.maxResults ?? payload.max_results ?? 20,
+    );
+    const maxResults = Number.isFinite(maxResultsRaw)
+      ? Math.max(1, Math.min(100, maxResultsRaw))
+      : 20;
+
+    const startHistoryId = pickString(payload, [
+      "startHistoryId",
+      "historyId",
+      "cursor",
+    ]);
+    const labelId = pickString(payload, ["labelId"]);
+
+    if (!startHistoryId) {
+      const profile = await gmailApiRequest(config, "GET", "/profile");
+      return {
+        listening: true,
+        mode: "poll_history",
+        startHistoryId: pickString(profile, ["historyId"]),
+        hint: "Call gmail.listen_email_events again with startHistoryId to fetch mailbox changes.",
+      };
+    }
+
+    const query = new URLSearchParams({
+      startHistoryId,
+      maxResults: String(maxResults),
+      ...(labelId ? { labelId } : {}),
+    });
+
+    let response: JsonRecord;
+    try {
+      response = await gmailApiRequest(
+        config,
+        "GET",
+        `/history?${query.toString()}`,
+      );
+    } catch (error) {
+      throw withGmailPermissionGuidance(error, "listen_email_events");
+    }
+
+    const history = parseBodyAsList(response.history).map((entry) => {
+      const record = parseBodyAsRecord(entry);
+      const messagesAdded = parseBodyAsList(record.messagesAdded).map(
+        (added) => {
+          const message = parseBodyAsRecord(parseBodyAsRecord(added).message);
+          return {
+            id: pickString(message, ["id"]),
+            threadId: pickString(message, ["threadId"]),
+          };
+        },
+      );
+
+      return {
+        id: pickString(record, ["id"]),
+        messagesAdded,
+      };
+    });
+
+    return {
+      listening: true,
+      mode: "poll_history",
+      history,
+      nextHistoryId: pickString(response, ["historyId"]),
+      historyCount: history.length,
     };
   },
 
@@ -3830,7 +5509,10 @@ const handlers: Record<string, MCPHandler> = {
       `/repos/${repo}/events?per_page=${limit}`,
     );
 
-    const eventTypeMap: Record<string, "push" | "pull_request" | "issue" | "other"> = {
+    const eventTypeMap: Record<
+      string,
+      "push" | "pull_request" | "issue" | "other"
+    > = {
       PushEvent: "push",
       PullRequestEvent: "pull_request",
       IssuesEvent: "issue",
@@ -3961,11 +5643,28 @@ export async function executeNode(
     },
     slack: {
       "send-message": "slack.sendMessage",
+      send_message: "slack.sendMessage",
       "on-message": "slack.sendMessage",
       "get-channels": "slack.getChannels",
+      get_channels: "slack.getChannels",
+      "get-channel": "slack.getChannel",
+      get_channel: "slack.getChannel",
       "send-dm": "slack.sendDirectMessage",
+      send_dm: "slack.sendDirectMessage",
       "update-message": "slack.updateMessage",
+      update_message: "slack.updateMessage",
+      "reply-in-thread": "slack.replyInThread",
+      reply_in_thread: "slack.replyInThread",
+      "get-thread-messages": "slack.getThreadMessages",
+      get_thread_messages: "slack.getThreadMessages",
+      "get-user": "slack.getUser",
+      get_user: "slack.getUser",
+      "listen-slack-events": "slack.listenSlackEvents",
+      listen_slack_events: "slack.listenSlackEvents",
+      "handle-interactions": "slack.handleInteractions",
+      handle_interactions: "slack.handleInteractions",
       "delete-message": "slack.deleteMessage",
+      delete_message: "slack.deleteMessage",
       "create-channel": "slack.createChannel",
     },
     github: {
@@ -3989,18 +5688,38 @@ export async function executeNode(
     google_sheets: {
       "read-sheet": "sheets.readRange",
       "read-range": "sheets.readRange",
+      "get-rows": "sheets.getRows",
       "append-row": "sheets.appendRow",
+      "add-row": "sheets.addRow",
       "update-cells": "sheets.updateCells",
+      "update-row": "sheets.updateRow",
+      "delete-row": "sheets.deleteRow",
+      "query-rows": "sheets.queryRows",
+      "list-sheets": "sheets.listSheets",
     },
     sheets: {
       "read-sheet": "sheets.readRange",
       "read-range": "sheets.readRange",
+      "get-rows": "sheets.getRows",
       "append-row": "sheets.appendRow",
+      "add-row": "sheets.addRow",
       "update-cells": "sheets.updateCells",
+      "update-row": "sheets.updateRow",
+      "delete-row": "sheets.deleteRow",
+      "query-rows": "sheets.queryRows",
+      "list-sheets": "sheets.listSheets",
     },
     gmail: {
       "list-messages": "gmail.listMessages",
+      "search-emails": "gmail.searchEmails",
+      "read-email": "gmail.readEmail",
+      "parse-email": "gmail.parseEmail",
       "send-message": "gmail.sendMessage",
+      "reply-email": "gmail.replyEmail",
+      "add-label": "gmail.addLabel",
+      "get-thread": "gmail.getThread",
+      "get-attachments": "gmail.getAttachments",
+      "listen-email-events": "gmail.listenEmailEvents",
       "create-draft": "gmail.createDraft",
     },
     postgres: {
@@ -4118,8 +5837,32 @@ export function getAvailableMethods(): {
       description: "List available Slack channels",
     },
     {
+      method: "slack.getChannel",
+      description: "Get Slack channel details by ID or name",
+    },
+    {
       method: "slack.sendDirectMessage",
       description: "Send a Slack direct message",
+    },
+    {
+      method: "slack.getUser",
+      description: "Get Slack user info by id, email, or name",
+    },
+    {
+      method: "slack.replyInThread",
+      description: "Reply to an existing Slack thread",
+    },
+    {
+      method: "slack.getThreadMessages",
+      description: "List messages in a Slack thread",
+    },
+    {
+      method: "slack.listenSlackEvents",
+      description: "Normalize Slack Events API and slash-command payloads",
+    },
+    {
+      method: "slack.handleInteractions",
+      description: "Handle Slack button/action interactions and approvals",
     },
     {
       method: "slack.postThreadReply",
@@ -4182,20 +5925,76 @@ export function getAvailableMethods(): {
       description: "Read values from Google Sheets range",
     },
     {
+      method: "sheets.getRows",
+      description: "Get structured rows from Google Sheets",
+    },
+    {
       method: "sheets.appendRow",
       description: "Append row(s) to Google Sheets",
+    },
+    {
+      method: "sheets.addRow",
+      description: "Add a row to Google Sheets",
     },
     {
       method: "sheets.updateCells",
       description: "Update Google Sheets cells",
     },
     {
+      method: "sheets.updateRow",
+      description: "Update a specific Google Sheets row",
+    },
+    {
+      method: "sheets.deleteRow",
+      description: "Delete a row from Google Sheets",
+    },
+    {
+      method: "sheets.queryRows",
+      description: "Query/filter rows from Google Sheets",
+    },
+    {
+      method: "sheets.listSheets",
+      description: "List tabs in a Google spreadsheet",
+    },
+    {
       method: "gmail.listMessages",
       description: "List Gmail messages",
     },
     {
+      method: "gmail.searchEmails",
+      description: "Search Gmail messages using Gmail query filters",
+    },
+    {
+      method: "gmail.readEmail",
+      description: "Read a Gmail message by ID",
+    },
+    {
+      method: "gmail.parseEmail",
+      description: "Parse a Gmail message into structured fields",
+    },
+    {
       method: "gmail.sendMessage",
       description: "Send an email through Gmail API",
+    },
+    {
+      method: "gmail.replyEmail",
+      description: "Reply to an existing Gmail thread or message",
+    },
+    {
+      method: "gmail.addLabel",
+      description: "Add or remove labels on a Gmail message",
+    },
+    {
+      method: "gmail.getThread",
+      description: "Get a Gmail thread and its message summaries",
+    },
+    {
+      method: "gmail.getAttachments",
+      description: "List or download Gmail message attachments",
+    },
+    {
+      method: "gmail.listenEmailEvents",
+      description: "Poll Gmail history API for new mailbox events",
     },
     {
       method: "gmail.createDraft",

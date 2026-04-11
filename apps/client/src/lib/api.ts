@@ -330,8 +330,7 @@ type ServiceType =
   | "postgres"
   | "sheets"
   | "google_sheets"
-  | "gmail"
-  | "aws";
+  | "gmail";
 
 interface DAGNode {
   id: string;
