@@ -1,32 +1,27 @@
 'use client';
 
-import React, { useState } from 'react';
+import React from 'react';
 import { useAuth } from '@/context/auth-context';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
+import { Toggle } from '@/components/ui/toggle';
 import { Badge } from '@/components/ui/badge';
-import { getInitials } from '@/lib/utils';
-import { authApi } from '@/lib/api';
+import { formatDateTime, formatRelativeTime, getInitials } from '@/lib/utils';
 import {
   User,
   Shield,
   Key,
+  Monitor,
+  Trash2,
+  LogOut,
   Save,
   CheckCircle2,
 } from 'lucide-react';
 
 export default function ProfilePage() {
-  const { user, updateUser, updateRole } = useAuth();
-  const [passwordForm, setPasswordForm] = useState({
-    currentPassword: '',
-    newPassword: '',
-    confirmPassword: '',
-  });
-  const [passwordError, setPasswordError] = useState('');
-  const [passwordSuccess, setPasswordSuccess] = useState('');
-  const [isSavingPassword, setIsSavingPassword] = useState(false);
+  const { user, sessions, updateUser, updateRole, updatePermissions, terminateSession } = useAuth();
 
   if (!user) return null;
 
@@ -35,42 +30,6 @@ export default function ProfilePage() {
     { value: 'operator', label: 'Operator - Execute & approve' },
     { value: 'viewer', label: 'Viewer - Read only' },
   ];
-
-  const handlePasswordUpdate = async () => {
-    setPasswordError('');
-    setPasswordSuccess('');
-
-    if (!passwordForm.currentPassword || !passwordForm.newPassword) {
-      setPasswordError('Current password and new password are required.');
-      return;
-    }
-
-    if (passwordForm.newPassword.length < 8) {
-      setPasswordError('New password must be at least 8 characters.');
-      return;
-    }
-
-    if (passwordForm.newPassword !== passwordForm.confirmPassword) {
-      setPasswordError('New password and confirmation do not match.');
-      return;
-    }
-
-    setIsSavingPassword(true);
-
-    const response = await authApi.changePassword(
-      passwordForm.currentPassword,
-      passwordForm.newPassword,
-    );
-
-    if (response.success) {
-      setPasswordSuccess('Password updated successfully.');
-      setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
-    } else {
-      setPasswordError(response.error || 'Failed to update password.');
-    }
-
-    setIsSavingPassword(false);
-  };
 
   return (
     <div className="space-y-6 max-w-4xl">
@@ -102,6 +61,20 @@ export default function ProfilePage() {
                   onChange={(e) => updateUser({ email: e.target.value })}
                 />
               </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-4 pt-4 border-t border-border">
+            <div>
+              <p className="text-sm text-content-secondary">Member since</p>
+              <p className="text-sm font-medium text-content-primary">
+                {formatDateTime(user.createdAt)}
+              </p>
+            </div>
+            <div>
+              <p className="text-sm text-content-secondary">Last login</p>
+              <p className="text-sm font-medium text-content-primary">
+                {user.lastLoginAt ? formatRelativeTime(user.lastLoginAt) : 'Never'}
+              </p>
             </div>
           </div>
         </CardContent>
@@ -209,6 +182,68 @@ export default function ProfilePage() {
         </CardContent>
       </Card>
 
+      {/* Active Sessions */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <Monitor className="h-5 w-5 text-primary" />
+            <CardTitle>Active Sessions</CardTitle>
+          </div>
+          <CardDescription>Manage your active sessions across devices</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-3">
+            {sessions.map((session) => (
+              <div
+                key={session.id}
+                className="flex items-center justify-between p-3 rounded-lg bg-surface-secondary"
+              >
+                <div className="flex items-center gap-4">
+                  <Monitor className="h-5 w-5 text-content-tertiary" />
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-medium text-content-primary">{session.device}</p>
+                      {session.isCurrent && (
+                        <Badge variant="primary" size="sm">
+                          Current
+                        </Badge>
+                      )}
+                    </div>
+                    <p className="text-xs text-content-tertiary">
+                      {session.browser} · {session.ip}
+                      {session.location && ` · ${session.location}`}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  <p className="text-xs text-content-tertiary">
+                    Last active: {formatRelativeTime(session.lastActiveAt)}
+                  </p>
+                  {!session.isCurrent && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => terminateSession(session.id)}
+                      className="text-error hover:bg-error-light"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+        <CardFooter className="justify-between">
+          <Button variant="outline" leftIcon={<LogOut className="h-4 w-4" />}>
+            Sign Out All Other Sessions
+          </Button>
+          <Button variant="danger" leftIcon={<LogOut className="h-4 w-4" />}>
+            Sign Out
+          </Button>
+        </CardFooter>
+      </Card>
+
       {/* Security */}
       <Card>
         <CardHeader>
@@ -219,55 +254,18 @@ export default function ProfilePage() {
           <CardDescription>Manage your password and security settings</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          {passwordError ? (
-            <div className="rounded-md border border-error/40 bg-error/10 px-3 py-2 text-sm text-error">
-              {passwordError}
-            </div>
-          ) : null}
-          {passwordSuccess ? (
-            <div className="rounded-md border border-success/40 bg-success/10 px-3 py-2 text-sm text-success">
-              {passwordSuccess}
-            </div>
-          ) : null}
-          <Input
-            label="Current Password"
-            type="password"
-            placeholder="Enter current password"
-            value={passwordForm.currentPassword}
-            onChange={(e) =>
-              setPasswordForm((prev) => ({ ...prev, currentPassword: e.target.value }))
-            }
-          />
+          <Input label="Current Password" type="password" placeholder="Enter current password" />
           <div className="grid grid-cols-2 gap-4">
-            <Input
-              label="New Password"
-              type="password"
-              placeholder="Enter new password"
-              value={passwordForm.newPassword}
-              onChange={(e) =>
-                setPasswordForm((prev) => ({ ...prev, newPassword: e.target.value }))
-              }
-            />
+            <Input label="New Password" type="password" placeholder="Enter new password" />
             <Input
               label="Confirm New Password"
               type="password"
               placeholder="Confirm new password"
-              value={passwordForm.confirmPassword}
-              onChange={(e) =>
-                setPasswordForm((prev) => ({ ...prev, confirmPassword: e.target.value }))
-              }
             />
           </div>
         </CardContent>
         <CardFooter>
-          <Button
-            leftIcon={<Save className="h-4 w-4" />}
-            isLoading={isSavingPassword}
-            onClick={handlePasswordUpdate}
-            disabled={!passwordForm.currentPassword || !passwordForm.newPassword}
-          >
-            Update Password
-          </Button>
+          <Button leftIcon={<Save className="h-4 w-4" />}>Update Password</Button>
         </CardFooter>
       </Card>
     </div>

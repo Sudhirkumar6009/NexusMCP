@@ -145,11 +145,6 @@ export const integrationsApi = {
 
   get: (id: string) => fetchApi<Integration>(`/integrations/${id}`),
 
-  getEnvCredentials: () =>
-    fetchApi<Record<string, Record<string, unknown>>>(
-      "/integrations/env-credentials",
-    ),
-
   connect: (id: string, credentials: Record<string, unknown>) =>
     fetchApi<Integration>(`/integrations/${id}/connect`, {
       method: "POST",
@@ -222,12 +217,6 @@ export const authApi = {
     fetchApi<User>("/auth/me", {
       method: "PUT",
       body: JSON.stringify(updates),
-    }),
-
-  changePassword: (currentPassword: string, newPassword: string) =>
-    fetchApi<void>("/auth/password", {
-      method: "PUT",
-      body: JSON.stringify({ currentPassword, newPassword }),
     }),
 
   getSessions: () => fetchApi<Session[]>("/auth/sessions"),
@@ -336,7 +325,8 @@ type ServiceType =
   | "postgres"
   | "sheets"
   | "google_sheets"
-  | "gmail";
+  | "gmail"
+  | "aws";
 
 interface DAGNode {
   id: string;
@@ -424,7 +414,6 @@ interface AuditLog {
   service: ServiceType | "system";
   action: string;
   message: string;
-  executionId?: string;
   details?: Record<string, unknown>;
   workflowId?: string;
   nodeId?: string;

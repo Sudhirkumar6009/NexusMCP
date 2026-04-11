@@ -70,6 +70,7 @@ export default function SignupPage() {
       if (data.success) {
         if (data.data?.token) {
           localStorage.setItem("auth_token", data.data.token);
+          window.dispatchEvent(new Event("auth-token-updated"));
         }
         router.push("/dashboard");
       } else {

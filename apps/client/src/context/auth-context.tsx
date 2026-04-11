@@ -1,15 +1,12 @@
 'use client';
 
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
 import { User, UserRole, UserPermissions, Session, GlobalSettings, LLMConfig, ExecutionPolicy } from '@/types';
 
-// Default user
-const defaultUser: User = {
-  id: 'user-1',
-  email: 'admin@nexusmcp.io',
-  name: 'Admin User',
-  role: 'admin',
-  permissions: {
+const AUTH_TOKEN_UPDATED_EVENT = 'auth-token-updated';
+
+const rolePermissions: Record<UserRole, UserPermissions> = {
+  admin: {
     canExecuteWorkflows: true,
     canApproveOperations: true,
     canModifyIntegrations: true,
@@ -19,9 +16,62 @@ const defaultUser: User = {
     allowedServices: [],
     allowedTools: [],
   },
-  createdAt: new Date('2024-01-01'),
-  lastLoginAt: new Date(),
+  operator: {
+    canExecuteWorkflows: true,
+    canApproveOperations: true,
+    canModifyIntegrations: false,
+    canViewAuditLogs: true,
+    canModifySettings: false,
+    canManageUsers: false,
+    allowedServices: [],
+    allowedTools: [],
+  },
+  viewer: {
+    canExecuteWorkflows: false,
+    canApproveOperations: false,
+    canModifyIntegrations: false,
+    canViewAuditLogs: true,
+    canModifySettings: false,
+    canManageUsers: false,
+    allowedServices: [],
+    allowedTools: [],
+  },
 };
+
+interface BackendUser {
+  id?: string;
+  _id?: string;
+  email?: string;
+  name?: string;
+  avatar?: string;
+  role?: string;
+  createdAt?: string | Date;
+  lastLogin?: string | Date;
+  lastLoginAt?: string | Date;
+}
+
+function toRole(role?: string): UserRole {
+  return role === 'admin' || role === 'operator' || role === 'viewer' ? role : 'viewer';
+}
+
+function mapBackendUser(data: BackendUser): User {
+  const role = toRole(data.role);
+
+  return {
+    id: data.id || data._id || 'user-1',
+    email: data.email || '',
+    name: data.name || 'User',
+    avatar: data.avatar,
+    role,
+    permissions: rolePermissions[role],
+    createdAt: data.createdAt ? new Date(data.createdAt) : new Date(),
+    lastLoginAt: data.lastLoginAt
+      ? new Date(data.lastLoginAt)
+      : data.lastLogin
+        ? new Date(data.lastLogin)
+        : undefined,
+  };
+}
 
 // Default sessions
 const defaultSessions: Session[] = [
@@ -80,6 +130,7 @@ interface AuthContextType {
   sessions: Session[];
   settings: GlobalSettings;
   isAuthenticated: boolean;
+  refreshUser: () => Promise<void>;
   login: (email: string, password: string) => Promise<boolean>;
   logout: () => void;
   updateUser: (updates: Partial<User>) => void;
@@ -94,22 +145,103 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(defaultUser);
+  const [user, setUser] = useState<User | null>(null);
   const [sessions, setSessions] = useState<Session[]>(defaultSessions);
   const [settings, setSettings] = useState<GlobalSettings>(defaultSettings);
 
+  const refreshUser = useCallback(async () => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null;
+
+    if (!token) {
+      setUser(null);
+      return;
+    }
+
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+
+    try {
+      const response = await fetch(`${apiUrl}/api/auth/me`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to load user profile');
+      }
+
+      const payload = await response.json();
+      if (payload?.success && payload.data) {
+        setUser(mapBackendUser(payload.data as BackendUser));
+        return;
+      }
+
+      throw new Error('Invalid profile response');
+    } catch {
+      setUser(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshUser();
+
+    const onTokenUpdated = () => {
+      void refreshUser();
+    };
+
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === 'auth_token') {
+        void refreshUser();
+      }
+    };
+
+    window.addEventListener(AUTH_TOKEN_UPDATED_EVENT, onTokenUpdated);
+    window.addEventListener('storage', onStorage);
+
+    return () => {
+      window.removeEventListener(AUTH_TOKEN_UPDATED_EVENT, onTokenUpdated);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, [refreshUser]);
+
   const login = useCallback(async (email: string, password: string): Promise<boolean> => {
-    // Simulate login - always succeeds for demo
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    setUser({
-      ...defaultUser,
-      email,
-      lastLoginAt: new Date(),
-    });
-    return true;
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+      const response = await fetch(`${apiUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+        credentials: 'include',
+      });
+
+      const payload = await response.json();
+      if (!payload?.success) {
+        return false;
+      }
+
+      if (payload.data?.token && typeof window !== 'undefined') {
+        localStorage.setItem('auth_token', payload.data.token);
+        window.dispatchEvent(new Event(AUTH_TOKEN_UPDATED_EVENT));
+      }
+
+      if (payload.data?.user) {
+        setUser(mapBackendUser(payload.data.user as BackendUser));
+      } else {
+        await refreshUser();
+      }
+
+      return true;
+    } catch {
+      return false;
+    }
   }, []);
 
   const logout = useCallback(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('auth_token');
+      window.dispatchEvent(new Event(AUTH_TOKEN_UPDATED_EVENT));
+    }
     setUser(null);
     setSessions([]);
   }, []);
@@ -119,39 +251,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const updateRole = useCallback((role: UserRole) => {
-    const rolePermissions: Record<UserRole, UserPermissions> = {
-      admin: {
-        canExecuteWorkflows: true,
-        canApproveOperations: true,
-        canModifyIntegrations: true,
-        canViewAuditLogs: true,
-        canModifySettings: true,
-        canManageUsers: true,
-        allowedServices: [],
-        allowedTools: [],
-      },
-      operator: {
-        canExecuteWorkflows: true,
-        canApproveOperations: true,
-        canModifyIntegrations: false,
-        canViewAuditLogs: true,
-        canModifySettings: false,
-        canManageUsers: false,
-        allowedServices: [],
-        allowedTools: [],
-      },
-      viewer: {
-        canExecuteWorkflows: false,
-        canApproveOperations: false,
-        canModifyIntegrations: false,
-        canViewAuditLogs: true,
-        canModifySettings: false,
-        canManageUsers: false,
-        allowedServices: [],
-        allowedTools: [],
-      },
-    };
-
     setUser((prev) =>
       prev
         ? {
@@ -203,6 +302,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         sessions,
         settings,
         isAuthenticated: !!user,
+        refreshUser,
         login,
         logout,
         updateUser,

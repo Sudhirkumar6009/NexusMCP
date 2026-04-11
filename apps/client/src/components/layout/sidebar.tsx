@@ -2,17 +2,14 @@
 
 import React from 'react';
 import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
-import { authApi } from '@/lib/api';
-import { useAuth } from '@/context/auth-context';
 import {
   LayoutDashboard,
   Plug,
   ScrollText,
   Settings,
   User,
-  LogOut,
   Zap,
 } from 'lucide-react';
 
@@ -32,15 +29,6 @@ const navItems: NavItem[] = [
 
 export function Sidebar() {
   const pathname = usePathname();
-  const router = useRouter();
-  const { user, logout } = useAuth();
-
-  const handleLogout = async () => {
-    await authApi.logout();
-    localStorage.removeItem('auth_token');
-    logout();
-    router.push('/login');
-  };
 
   return (
     <aside className="fixed left-0 top-0 z-40 h-screen w-64 border-r border-border bg-surface-primary">
@@ -80,25 +68,13 @@ export function Sidebar() {
       <div className="absolute bottom-0 left-0 right-0 border-t border-border p-4">
         <div className="flex items-center gap-3 rounded-lg bg-surface-secondary px-3 py-2.5">
           <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-white text-sm font-medium">
-            {user?.name?.[0]?.toUpperCase() || 'U'}
+            AU
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-content-primary truncate">
-              {user?.name || 'User'}
-            </p>
-            <p className="text-xs text-content-tertiary truncate">
-              {user?.email || 'user@example.com'}
-            </p>
+            <p className="text-sm font-medium text-content-primary truncate">Admin User</p>
+            <p className="text-xs text-content-tertiary truncate">admin@nexusmcp.io</p>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={handleLogout}
-          className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-lg border border-error/40 bg-error/10 px-3 py-2 text-sm font-medium text-error transition-colors hover:bg-error/20"
-        >
-          <LogOut className="h-4 w-4" />
-          Logout
-        </button>
       </div>
     </aside>
   );

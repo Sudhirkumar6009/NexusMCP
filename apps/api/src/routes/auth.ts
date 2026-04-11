@@ -12,16 +12,7 @@ const TEST_LOGIN_PASSWORD = "Test@123";
 const TEST_LOGIN_USER_ID = "test-login-user";
 const TEST_LOGIN_USER_ROLE: IUser["role"] = "admin";
 const GOOGLE_BASE_AUTH_SCOPES = ["profile", "email"] as const;
-const GOOGLE_GMAIL_READ_SCOPE =
-  "https://www.googleapis.com/auth/gmail.readonly";
 const GOOGLE_GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
-const GOOGLE_GMAIL_COMPOSE_SCOPE =
-  "https://www.googleapis.com/auth/gmail.compose";
-const GOOGLE_GMAIL_SCOPES = [
-  GOOGLE_GMAIL_READ_SCOPE,
-  GOOGLE_GMAIL_SEND_SCOPE,
-  GOOGLE_GMAIL_COMPOSE_SCOPE,
-] as const;
 const GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_GMAIL_SEND_URL =
   "https://gmail.googleapis.com/gmail/v1/users/me/messages/send";
@@ -579,104 +570,6 @@ router.put("/me", authenticateToken, async (req: Request, res: Response) => {
   }
 });
 
-// PUT /api/auth/password - Update current user's password
-router.put(
-  "/password",
-  authenticateToken,
-  async (req: Request, res: Response) => {
-    try {
-      const userId = (req as AuthenticatedRequest).userId;
-      const { currentPassword, newPassword } = req.body as {
-        currentPassword?: string;
-        newPassword?: string;
-      };
-
-      if (userId === TEST_LOGIN_USER_ID) {
-        res.status(400).json({
-          success: false,
-          error: "Test login cannot update password",
-        });
-        return;
-      }
-
-      if (!currentPassword || !newPassword) {
-        res.status(400).json({
-          success: false,
-          error: "Current password and new password are required",
-        });
-        return;
-      }
-
-      if (newPassword.length < 8) {
-        res.status(400).json({
-          success: false,
-          error: "New password must be at least 8 characters",
-        });
-        return;
-      }
-
-      if (currentPassword === newPassword) {
-        res.status(400).json({
-          success: false,
-          error: "New password must be different from current password",
-        });
-        return;
-      }
-
-      const user = (await User.findById(userId).select("+password")) as
-        | IUser
-        | null;
-
-      if (!user) {
-        res.status(404).json({
-          success: false,
-          error: "User not found",
-        });
-        return;
-      }
-
-      if (!user.password) {
-        res.status(400).json({
-          success: false,
-          error: "This account uses Google sign-in and has no password",
-        });
-        return;
-      }
-
-      const isValidPassword = await user.comparePassword(currentPassword);
-      if (!isValidPassword) {
-        res.status(401).json({
-          success: false,
-          error: "Current password is incorrect",
-        });
-        return;
-      }
-
-      user.password = newPassword;
-      await user.save();
-
-      dataStore.addLog({
-        level: "info",
-        service: "system",
-        action: "user_password_changed",
-        message: `User updated password: ${user.email}`,
-        userId: user._id.toString(),
-      });
-
-      res.json({
-        success: true,
-        message: "Password updated successfully",
-      });
-    } catch (error) {
-      console.error("Update password error:", error);
-      res.status(500).json({
-        success: false,
-        error: "Failed to update password",
-      });
-    }
-  },
-);
-
 // POST /api/auth/logout - Logout
 router.post("/logout", (_req: Request, res: Response) => {
   res.clearCookie("auth_token");
@@ -1017,11 +910,11 @@ googleAuthRoutes.get(
   }),
 );
 
-// GET /auth/google/gmail - Re-consent with Gmail read/send/compose scopes
+// GET /auth/google/gmail - Re-consent with Gmail send scope
 googleAuthRoutes.get(
   "/google/gmail",
   authenticateGoogle({
-    scope: [...GOOGLE_BASE_AUTH_SCOPES, ...GOOGLE_GMAIL_SCOPES],
+    scope: [...GOOGLE_BASE_AUTH_SCOPES, GOOGLE_GMAIL_SEND_SCOPE],
     accessType: "offline",
     prompt: "consent",
     includeGrantedScopes: true,

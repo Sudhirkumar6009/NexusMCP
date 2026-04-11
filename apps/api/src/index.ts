@@ -20,11 +20,6 @@ import authRoutes, {
   authenticateToken,
 } from "./routes/auth.js";
 import mcpRoutes from "./routes/mcp.js";
-import {
-  initPostgresStore,
-  registerMcpTool,
-} from "./services/postgres-store.js";
-import { getAvailableMethods } from "./services/mcp.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -111,7 +106,6 @@ app.get("/api", (_req, res) => {
         "POST /api/auth/login": "Login with email/password",
         "GET /api/auth/me": "Get current user",
         "PUT /api/auth/me": "Update profile",
-        "PUT /api/auth/password": "Update password",
         "POST /api/auth/logout": "Logout",
         "POST /api/auth/gmail/token":
           "Exchange Gmail OAuth code or refresh access token",
@@ -171,35 +165,6 @@ async function startServer() {
       }
 
       console.warn("MongoDB is unavailable; starting API in no-DB test mode.");
-    }
-
-    try {
-      const postgresReady = await initPostgresStore();
-      if (postgresReady) {
-        for (const method of getAvailableMethods()) {
-          const [serviceName = "system", methodName = method.method] =
-            method.method.split(".");
-          await registerMcpTool({
-            toolId: `tool-${method.method}`,
-            serviceName,
-            methodName,
-            schema: {
-              description: method.description,
-            },
-          });
-        }
-        console.log("PostgreSQL store initialized successfully");
-      } else {
-        console.warn(
-          "PostgreSQL credentials not configured; using in-memory fallback for persistence.",
-        );
-      }
-    } catch (error) {
-      console.warn(
-        `PostgreSQL initialization failed; continuing with in-memory fallback: ${
-          error instanceof Error ? error.message : "Unknown error"
-        }`,
-      );
     }
 
     const server = app.listen(PORT, () => {
