@@ -6,6 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/context";
 import { Button } from "@/components/ui/button";
+import { logsApi } from "@/lib/api";
 import {
   LayoutDashboard,
   LogOut,
@@ -28,7 +29,6 @@ const navItems: NavItem[] = [
   { label: "Workflows", href: "/workflows", icon: Workflow },
   { label: "Integrations", href: "/integrations", icon: Plug },
   { label: "Audit Logs", href: "/logs", icon: ScrollText },
-  { label: "Settings", href: "/settings", icon: Settings },
   { label: "Profile", href: "/profile", icon: User },
 ];
 
@@ -36,6 +36,7 @@ export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const { user, logout } = useAuth();
+  const [auditErrorCount, setAuditErrorCount] = React.useState<number>(0);
 
   const displayName = user?.name?.trim() || "User";
   const displayEmail = user?.email?.trim() || "No email available";
@@ -54,6 +55,30 @@ export function Sidebar() {
     logout();
     router.push("/login");
   };
+
+  React.useEffect(() => {
+    let isMounted = true;
+
+    const loadAuditStats = async () => {
+      const response = await logsApi.getStats();
+      if (!isMounted || !response.success || !response.data) {
+        return;
+      }
+
+      setAuditErrorCount(response.data.byLevel.error ?? 0);
+    };
+
+    void loadAuditStats();
+
+    const intervalId = window.setInterval(() => {
+      void loadAuditStats();
+    }, 15000);
+
+    return () => {
+      isMounted = false;
+      window.clearInterval(intervalId);
+    };
+  }, []);
 
   return (
     <aside className="fixed left-0 top-0 z-40 h-screen w-64 border-r border-border bg-surface-primary">
@@ -79,14 +104,21 @@ export function Sidebar() {
               key={item.href}
               href={item.href}
               className={cn(
-                "flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors",
+                "flex items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors",
                 isActive
                   ? "bg-primary-light text-primary"
                   : "text-content-secondary hover:bg-surface-secondary hover:text-content-primary",
               )}
             >
-              <Icon className="h-5 w-5" />
-              {item.label}
+              <div className="flex items-center gap-3">
+                <Icon className="h-5 w-5" />
+                {item.label}
+              </div>
+              {item.href === "/logs" && auditErrorCount > 0 ? (
+                <span className="rounded-full bg-error/15 px-2 py-0.5 text-xs font-semibold text-error">
+                  {auditErrorCount}
+                </span>
+              ) : null}
             </Link>
           );
         })}

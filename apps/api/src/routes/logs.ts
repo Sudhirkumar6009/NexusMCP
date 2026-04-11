@@ -3,10 +3,40 @@ import { dataStore } from "../data/store.js";
 import {
   getEventLogs,
   getEventLogStats,
+  getStepRuns,
   isPostgresReady,
+  type StepRunRecord,
 } from "../services/postgres-store.js";
 
 const router = Router();
+
+function mapLogsToStepRunsFallback(limit: number, offset: number) {
+  const source = dataStore.getLogs({ limit: 1000, offset: 0 }).logs;
+  const stepLikeLogs = source.filter(
+    (log) => log.action === "mcp_execute" || log.action === "mcp_execute_node",
+  );
+
+  const rows: StepRunRecord[] = stepLikeLogs.map((log) => ({
+    stepId: `step-fallback-${log.id}`,
+    executionId: log.executionId,
+    workflowId: log.workflowId,
+    toolName:
+      (typeof log.details?.method === "string" && log.details.method) ||
+      (typeof log.details?.operation === "string" && log.details.operation) ||
+      log.action,
+    inputPayload: undefined,
+    outputPayload: log.details,
+    status: log.level === "error" ? "failed" : "success",
+    retryCount: 0,
+    createdAt: log.timestamp,
+    updatedAt: log.timestamp,
+  }));
+
+  return {
+    rows: rows.slice(offset, offset + limit),
+    total: rows.length,
+  };
+}
 
 // GET /api/logs - List audit logs with filtering
 router.get("/", async (req, res) => {
@@ -90,6 +120,61 @@ router.post("/", (req, res) => {
   res.status(201).json({
     success: true,
     data: log,
+  });
+});
+
+// GET /api/logs/step-runs - List persisted step runs
+router.get("/step-runs", async (req, res) => {
+  const { executionId, workflowId, status, search, limit, offset } = req.query;
+
+  const parsedLimit = limit ? parseInt(limit as string, 10) : 100;
+  const parsedOffset = offset ? parseInt(offset as string, 10) : 0;
+
+  const filters = {
+    executionId: typeof executionId === "string" ? executionId : undefined,
+    workflowId: typeof workflowId === "string" ? workflowId : undefined,
+    status: typeof status === "string" ? status : undefined,
+    search: typeof search === "string" ? search : undefined,
+    limit: Number.isFinite(parsedLimit)
+      ? Math.min(Math.max(parsedLimit, 1), 500)
+      : 100,
+    offset: Number.isFinite(parsedOffset) ? Math.max(parsedOffset, 0) : 0,
+  };
+
+  if (isPostgresReady()) {
+    try {
+      const result = await getStepRuns(filters);
+
+      return res.json({
+        success: true,
+        source: "postgres",
+        data: result.rows,
+        pagination: {
+          total: result.total,
+          limit: filters.limit,
+          offset: filters.offset,
+        },
+      });
+    } catch (error) {
+      console.warn(
+        `PostgreSQL step-runs query failed; using in-memory fallback: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`,
+      );
+    }
+  }
+
+  const fallback = mapLogsToStepRunsFallback(filters.limit, filters.offset);
+
+  return res.json({
+    success: true,
+    source: "memory",
+    data: fallback.rows,
+    pagination: {
+      total: fallback.total,
+      limit: filters.limit,
+      offset: filters.offset,
+    },
   });
 });
 

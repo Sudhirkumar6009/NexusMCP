@@ -23,6 +23,28 @@ type LogFilters = {
   offset?: number;
 };
 
+type StepRunFilters = {
+  executionId?: string;
+  workflowId?: string;
+  status?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+};
+
+export type StepRunRecord = {
+  stepId: string;
+  executionId?: string;
+  workflowId?: string;
+  toolName: string;
+  inputPayload?: Json;
+  outputPayload?: Json;
+  status: string;
+  retryCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 let postgresReady = false;
 
 const schemaStatements = [
@@ -54,6 +76,8 @@ const schemaStatements = [
       status TEXT NOT NULL,
       retry_count INTEGER NOT NULL DEFAULT 0
     );`,
+  `ALTER TABLE step_runs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`,
+  `ALTER TABLE step_runs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();`,
   `CREATE TABLE IF NOT EXISTS mcp_tool_registry (
       tool_id TEXT PRIMARY KEY,
       service_name TEXT NOT NULL,
@@ -101,6 +125,7 @@ const schemaStatements = [
   `CREATE INDEX IF NOT EXISTS idx_event_logs_level ON event_logs(level);`,
   `CREATE INDEX IF NOT EXISTS idx_event_logs_service ON event_logs(service);`,
   `CREATE INDEX IF NOT EXISTS idx_step_runs_execution_id ON step_runs(execution_id);`,
+  `CREATE INDEX IF NOT EXISTS idx_step_runs_updated_at ON step_runs(updated_at DESC);`,
   `CREATE INDEX IF NOT EXISTS idx_workflow_executions_workflow_id ON workflow_executions(workflow_id);`,
 ];
 
@@ -234,7 +259,9 @@ function parseWorkflowRow(row: Record<string, unknown>): Workflow {
     nodes: nodes as Workflow["nodes"],
     edges: edges as Workflow["edges"],
     status,
-    createdAt: new Date(String(row.created_at || new Date().toISOString())).toISOString(),
+    createdAt: new Date(
+      String(row.created_at || new Date().toISOString()),
+    ).toISOString(),
     updatedAt: new Date(
       String(row.updated_at || row.created_at || new Date().toISOString()),
     ).toISOString(),
@@ -251,7 +278,9 @@ export async function listWorkflowDefinitions(): Promise<Workflow[]> {
      ORDER BY updated_at DESC, created_at DESC`,
   );
 
-  return result.rows.map((row) => parseWorkflowRow(row as Record<string, unknown>));
+  return result.rows.map((row) =>
+    parseWorkflowRow(row as Record<string, unknown>),
+  );
 }
 
 export async function getWorkflowDefinition(
@@ -274,7 +303,9 @@ export async function getWorkflowDefinition(
   return parseWorkflowRow(result.rows[0] as Record<string, unknown>);
 }
 
-export async function deleteWorkflowDefinition(workflowId: string): Promise<boolean> {
+export async function deleteWorkflowDefinition(
+  workflowId: string,
+): Promise<boolean> {
   if (!postgresReady) return false;
 
   const result = await query(
@@ -322,13 +353,15 @@ export async function saveStepRun(args: {
   if (!postgresReady) return;
 
   await query(
-    `INSERT INTO step_runs (step_id, execution_id, tool_name, input_payload, output_payload, status, retry_count)
-     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7)
+    `INSERT INTO step_runs (step_id, execution_id, tool_name, input_payload, output_payload, status, retry_count, created_at, updated_at)
+     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, NOW(), NOW())
      ON CONFLICT (step_id)
      DO UPDATE SET
+       input_payload = COALESCE(step_runs.input_payload, EXCLUDED.input_payload),
        output_payload = EXCLUDED.output_payload,
        status = EXCLUDED.status,
-       retry_count = EXCLUDED.retry_count`,
+       retry_count = EXCLUDED.retry_count,
+       updated_at = NOW()`,
     [
       args.stepId,
       args.executionId || null,
@@ -566,6 +599,86 @@ export async function getEventLogStats(): Promise<{
   }
 
   return stats;
+}
+
+export async function getStepRuns(
+  filters?: StepRunFilters,
+): Promise<{ rows: StepRunRecord[]; total: number }> {
+  if (!postgresReady) {
+    return { rows: [], total: 0 };
+  }
+
+  const where: string[] = [];
+  const params: unknown[] = [];
+
+  if (filters?.executionId) {
+    params.push(filters.executionId);
+    where.push(`s.execution_id = $${params.length}`);
+  }
+
+  if (filters?.workflowId) {
+    params.push(filters.workflowId);
+    where.push(`e.workflow_id = $${params.length}`);
+  }
+
+  if (filters?.status) {
+    params.push(filters.status);
+    where.push(`s.status = $${params.length}`);
+  }
+
+  if (filters?.search) {
+    params.push(`%${filters.search}%`);
+    where.push(`s.tool_name ILIKE $${params.length}`);
+  }
+
+  const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+
+  const totalResult = await query(
+    `SELECT COUNT(*)::int AS total
+     FROM step_runs s
+     LEFT JOIN workflow_executions e ON e.execution_id = s.execution_id
+     ${whereClause}`,
+    params,
+  );
+
+  const limit = filters?.limit ?? 100;
+  const offset = filters?.offset ?? 0;
+  const rowParams = [...params, limit, offset];
+
+  const rowsResult = await query(
+    `SELECT s.step_id, s.execution_id, e.workflow_id, s.tool_name, s.input_payload, s.output_payload, s.status, s.retry_count, s.created_at, s.updated_at
+     FROM step_runs s
+     LEFT JOIN workflow_executions e ON e.execution_id = s.execution_id
+     ${whereClause}
+     ORDER BY s.updated_at DESC, s.created_at DESC
+     LIMIT $${rowParams.length - 1}
+     OFFSET $${rowParams.length}`,
+    rowParams,
+  );
+
+  const rows: StepRunRecord[] = rowsResult.rows.map((row) => ({
+    stepId: String(row.step_id),
+    executionId: row.execution_id ? String(row.execution_id) : undefined,
+    workflowId: row.workflow_id ? String(row.workflow_id) : undefined,
+    toolName: String(row.tool_name),
+    inputPayload:
+      row.input_payload === null || row.input_payload === undefined
+        ? undefined
+        : (row.input_payload as Json),
+    outputPayload:
+      row.output_payload === null || row.output_payload === undefined
+        ? undefined
+        : (row.output_payload as Json),
+    status: String(row.status),
+    retryCount: Number(row.retry_count ?? 0),
+    createdAt: new Date(row.created_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString(),
+  }));
+
+  return {
+    rows,
+    total: totalResult.rows[0]?.total ?? 0,
+  };
 }
 
 export async function saveApprovalRequest(args: {

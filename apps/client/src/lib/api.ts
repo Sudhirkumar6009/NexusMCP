@@ -121,7 +121,9 @@ export const workflowsApi = {
     if (options?.offset) params.set("offset", String(options.offset));
     const query = params.toString();
 
-    return fetchApi<WorkflowAuditsPayload>(`/workflows/${id}/audits${query ? `?${query}` : ""}`);
+    return fetchApi<WorkflowAuditsPayload>(
+      `/workflows/${id}/audits${query ? `?${query}` : ""}`,
+    );
   },
 
   generate: (prompt: string) =>
@@ -151,6 +153,11 @@ export const workflowsApi = {
 // Integrations API
 export const integrationsApi = {
   list: () => fetchApi<Integration[]>("/integrations"),
+
+  getEnvCredentials: () =>
+    fetchApi<Record<string, Record<string, unknown>>>(
+      "/integrations/env-credentials",
+    ),
 
   get: (id: string) => fetchApi<Integration>(`/integrations/${id}`),
 
@@ -184,6 +191,19 @@ export const logsApi = {
 
     const query = params.toString();
     return fetchApi<AuditLog[]>(`/logs${query ? `?${query}` : ""}`);
+  },
+
+  listStepRuns: (filters?: StepRunFilters) => {
+    const params = new URLSearchParams();
+    if (filters?.executionId) params.set("executionId", filters.executionId);
+    if (filters?.workflowId) params.set("workflowId", filters.workflowId);
+    if (filters?.status) params.set("status", filters.status);
+    if (filters?.search) params.set("search", filters.search);
+    if (filters?.limit) params.set("limit", String(filters.limit));
+    if (filters?.offset) params.set("offset", String(filters.offset));
+
+    const query = params.toString();
+    return fetchApi<StepRun[]>(`/logs/step-runs${query ? `?${query}` : ""}`);
   },
 
   getStats: () => fetchApi<LogStats>("/logs/stats"),
@@ -423,6 +443,7 @@ interface AuditLog {
   service: ServiceType | "system";
   action: string;
   message: string;
+  executionId?: string;
   details?: Record<string, unknown>;
   workflowId?: string;
   nodeId?: string;
@@ -457,6 +478,28 @@ interface LogStats {
   byLevel: Record<AuditLog["level"], number>;
   byService: Record<AuditLog["service"], number>;
   last24Hours: number;
+}
+
+export interface StepRun {
+  stepId: string;
+  executionId?: string;
+  workflowId?: string;
+  toolName: string;
+  inputPayload?: unknown;
+  outputPayload?: unknown;
+  status: string;
+  retryCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface StepRunFilters {
+  executionId?: string;
+  workflowId?: string;
+  status?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
 }
 
 interface User {

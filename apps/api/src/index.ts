@@ -20,6 +20,7 @@ import authRoutes, {
   authenticateToken,
 } from "./routes/auth.js";
 import mcpRoutes from "./routes/mcp.js";
+import { initPostgresStore } from "./services/postgres-store.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -127,6 +128,8 @@ app.get("/api", (_req, res) => {
       },
       logs: {
         "GET /api/logs": "List audit logs",
+        "GET /api/logs/step-runs": "List persisted workflow step runs",
+        "GET /api/logs/stats": "Get audit log aggregates",
       },
       settings: {
         "GET /api/settings": "Get settings",
@@ -155,6 +158,7 @@ app.use(errorHandler);
 async function startServer() {
   try {
     let dbConnected = false;
+    let postgresConnected = false;
 
     try {
       // Connect to MongoDB
@@ -166,6 +170,20 @@ async function startServer() {
       }
 
       console.warn("MongoDB is unavailable; starting API in no-DB test mode.");
+    }
+
+    try {
+      postgresConnected = await initPostgresStore();
+    } catch (error) {
+      if (process.env.NODE_ENV === "production") {
+        throw error;
+      }
+
+      console.warn(
+        `PostgreSQL is unavailable; PostgreSQL-backed persistence disabled: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`,
+      );
     }
 
     const server = app.listen(PORT, () => {
@@ -180,6 +198,7 @@ async function startServer() {
 ║                                                           ║
 ║   Environment: ${(process.env.NODE_ENV || "development").padEnd(40)}║
 ║   MongoDB: ${(dbConnected ? "Connected" : "Unavailable").padEnd(40)}║
+║   PostgreSQL: ${(postgresConnected ? "Connected" : "Unavailable").padEnd(39)}║
 ║                                                           ║
 ╚═══════════════════════════════════════════════════════════╝
       `);
