@@ -27,6 +27,7 @@ import "reactflow/dist/style.css";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Modal, ModalFooter } from "@/components/ui/modal";
 import { Textarea } from "@/components/ui/textarea";
 import { ConnectorCredentialsModal } from "@/components/integrations/connector-credentials-modal";
 import { workflowsApi } from "@/lib/api";
@@ -35,6 +36,7 @@ import {
   createAgentFlowPlan,
   createInitialRuntimeMap,
   executeAgentFlow,
+  getTargetServiceIds,
 } from "@/lib/agentic-flow";
 import { cn } from "@/lib/utils";
 import { useIntegrations } from "@/context/integrations-context";
@@ -507,6 +509,7 @@ export function AgenticFlowRunner() {
   const [pendingConnectorId, setPendingConnectorId] =
     useState<ServiceId | null>(null);
   const [auditTrail, setAuditTrail] = useState<AgentToolAuditUpdate[]>([]);
+  const [showNoProviderModal, setShowNoProviderModal] = useState(false);
 
   useEffect(() => {
     integrationsRef.current = integrations;
@@ -679,6 +682,7 @@ export function AgenticFlowRunner() {
     abortRef.current?.abort();
     abortRef.current = null;
     resolveConnectorModal("cancelled");
+    setShowNoProviderModal(false);
     setNodePositionOverrides({});
     setManualEdges([]);
     setPlan(null);
@@ -696,6 +700,7 @@ export function AgenticFlowRunner() {
     abortRef.current?.abort();
     abortRef.current = null;
     resolveConnectorModal("cancelled");
+    setShowNoProviderModal(false);
     setNodePositionOverrides({});
     setManualEdges([]);
     setAuditTrail([]);
@@ -704,6 +709,16 @@ export function AgenticFlowRunner() {
 
     const controller = new AbortController();
     abortRef.current = controller;
+
+    const targetServices = getTargetServiceIds(trimmedPrompt, integrations);
+    if (targetServices.length === 0) {
+      abortRef.current = null;
+      setPlan(null);
+      setRuntime({});
+      setRunState("idle");
+      setShowNoProviderModal(true);
+      return;
+    }
 
     const requestPayload: AgentFlowRequestPayload = {
       prompt: trimmedPrompt,
@@ -1006,6 +1021,23 @@ export function AgenticFlowRunner() {
         onClose={handleConnectorModalClose}
         onSave={handleConnectorCredentialsSave}
       />
+
+      <Modal
+        isOpen={showNoProviderModal}
+        onClose={() => setShowNoProviderModal(false)}
+        title="No Workflow Providers Detected"
+        description="No workflow was created because the prompt does not mention any supported providers. Please reference services such as Jira, Slack, GitHub, Google Sheets, Gmail, or AWS."
+        size="sm"
+      >
+        <ModalFooter>
+          <Button
+            variant="outline"
+            onClick={() => setShowNoProviderModal(false)}
+          >
+            Close
+          </Button>
+        </ModalFooter>
+      </Modal>
     </Card>
   );
 }

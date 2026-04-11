@@ -186,15 +186,18 @@ EXAMPLE - For "Create branch and PR for Jira issue KAN-3 in repo backend":
             extracted["issue_key"] = issue_key_match.group(1)
 
         repo_patterns = [
-            r"\brepo(?:sitory)?\s+([a-zA-Z0-9._/-]+)\b",
-            r"\bin\s+repo(?:sitory)?\s+([a-zA-Z0-9._/-]+)\b",
-            r"\bin\s+([a-zA-Z0-9._/-]+)\s+repo(?:sitory)?\b",
+            r"\brepo(?:sitory)?(?:\s+(?:is|as|named|name))?\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\b",
+            r"\bin\s+repo(?:sitory)?(?:\s+(?:is|as|named|name))?\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\b",
+            r"\bin\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\s+repo(?:sitory)?\b",
         ]
+        invalid_repo_tokens = {"as", "is", "name", "named", "repo", "repository"}
         for pattern in repo_patterns:
             repo_match = re.search(pattern, prompt, re.IGNORECASE)
             if repo_match:
-                extracted["repo"] = repo_match.group(1)
-                break
+                repo_candidate = repo_match.group(1).strip()
+                if repo_candidate.lower() not in invalid_repo_tokens:
+                    extracted["repo"] = repo_candidate
+                    break
 
         branch_match = re.search(
             r"\b(?:branch(?:\s+name)?|head)\s+([a-zA-Z0-9._/-]+)\b",
@@ -571,8 +574,24 @@ EXAMPLE - For "Create branch and PR for Jira issue KAN-3 in repo backend":
         issue_key_match = re.search(r"\b([A-Z][A-Z0-9]+-\d+)\b", prompt)
         issue_key = issue_key_match.group(1) if issue_key_match else ""
 
-        repo_match = re.search(r"\brepo(?:sitory)?\s+([a-zA-Z0-9._/-]+)\b", prompt, re.IGNORECASE)
-        repo_name = repo_match.group(1) if repo_match else ""
+        repo_patterns = [
+            r"\brepo(?:sitory)?(?:\s+(?:is|as|named|name))?\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\b",
+            r"\bin\s+repo(?:sitory)?(?:\s+(?:is|as|named|name))?\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\b",
+            r"\bin\s+([a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+)\s+repo(?:sitory)?\b",
+        ]
+        invalid_repo_tokens = {"as", "is", "name", "named", "repo", "repository"}
+        repo_name = ""
+        for pattern in repo_patterns:
+            repo_match = re.search(pattern, prompt, re.IGNORECASE)
+            if not repo_match:
+                continue
+
+            repo_candidate = repo_match.group(1).strip()
+            if repo_candidate.lower() in invalid_repo_tokens:
+                continue
+
+            repo_name = repo_candidate
+            break
 
         branch_name = f"feature/{issue_key}" if issue_key else "feature/task"
 

@@ -8,6 +8,12 @@ import type {
   Session,
   WorkflowExecution,
 } from "../types/index.js";
+import {
+  saveEventLog,
+  saveServiceConnection,
+  saveWorkflowDefinition,
+  saveWorkflowExecution,
+} from "../services/postgres-store.js";
 
 // In-memory data store (simulating a database)
 class DataStore {
@@ -385,6 +391,9 @@ class DataStore {
       executionHistory: [],
     };
     this.workflows.set(newWorkflow.id, newWorkflow);
+    void saveWorkflowDefinition(newWorkflow).catch((error) => {
+      console.error("PostgreSQL workflow save failed:", error);
+    });
     this.addLog({
       level: "info",
       service: "system",
@@ -407,6 +416,9 @@ class DataStore {
       updatedAt: new Date().toISOString(),
     };
     this.workflows.set(id, updated);
+    void saveWorkflowDefinition(updated).catch((error) => {
+      console.error("PostgreSQL workflow update save failed:", error);
+    });
     this.addLog({
       level: "info",
       service: "system",
@@ -477,6 +489,22 @@ class DataStore {
       lastSync: new Date().toISOString(),
     };
     this.integrations.set(id, updated);
+    void saveServiceConnection({
+      connectionId: id,
+      serviceName: updated.service,
+      apiKey:
+        credentials?.apiKey ||
+        credentials?.accessKeyId ||
+        credentials?.username,
+      token:
+        credentials?.accessToken ||
+        credentials?.refreshToken ||
+        credentials?.apiSecret ||
+        credentials?.password,
+      scopes: [],
+    }).catch((error) => {
+      console.error("PostgreSQL connection save failed:", error);
+    });
     this.addLog({
       level: "info",
       service: updated.service,
@@ -497,6 +525,13 @@ class DataStore {
       lastSync: undefined,
     };
     this.integrations.set(id, updated);
+    void saveServiceConnection({
+      connectionId: id,
+      serviceName: updated.service,
+      scopes: [],
+    }).catch((error) => {
+      console.error("PostgreSQL connection clear failed:", error);
+    });
     this.addLog({
       level: "info",
       service: updated.service,
@@ -552,6 +587,10 @@ class DataStore {
     if (this.logs.length > 1000) {
       this.logs = this.logs.slice(0, 1000);
     }
+
+    void saveEventLog(newLog).catch((error) => {
+      console.error("PostgreSQL event log save failed:", error);
+    });
 
     return newLog;
   }
@@ -623,6 +662,9 @@ class DataStore {
     };
 
     this.executions.set(execution.id, execution);
+    void saveWorkflowExecution(execution).catch((error) => {
+      console.error("PostgreSQL execution save failed:", error);
+    });
 
     // Update workflow status
     workflow.status = "running";
@@ -656,6 +698,9 @@ class DataStore {
       ...updates,
     };
     this.executions.set(id, updated);
+    void saveWorkflowExecution(updated).catch((error) => {
+      console.error("PostgreSQL execution update save failed:", error);
+    });
     return updated;
   }
 }

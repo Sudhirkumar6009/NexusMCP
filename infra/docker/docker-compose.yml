@@ -8,7 +8,7 @@ services:
     environment:
       POSTGRES_USER: nexusmcp
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nexusmcp_dev}
-      POSTGRES_DB: nexusmcp
+      POSTGRES_DB: NexusMCP
     ports:
       - "5432:5432"
     volumes:
@@ -43,7 +43,7 @@ services:
     container_name: nexusmcp-api
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgresql://nexusmcp:${POSTGRES_PASSWORD:-nexusmcp_dev}@postgres:5432/nexusmcp
+      DATABASE_URL: postgresql://nexusmcp:${POSTGRES_PASSWORD:-nexusmcp_dev}@postgres:5432/NexusMCP
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET}
     ports:

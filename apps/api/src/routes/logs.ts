@@ -1,13 +1,18 @@
 import { Router } from "express";
 import { dataStore } from "../data/store.js";
+import {
+  getEventLogs,
+  getEventLogStats,
+  isPostgresReady,
+} from "../services/postgres-store.js";
 
 const router = Router();
 
 // GET /api/logs - List audit logs with filtering
-router.get("/", (req, res) => {
+router.get("/", async (req, res) => {
   const { level, service, search, limit, offset } = req.query;
 
-  const result = dataStore.getLogs({
+  const filters = {
     level: level as "info" | "warning" | "error" | "debug" | undefined,
     service: service as
       | "jira"
@@ -22,7 +27,24 @@ router.get("/", (req, res) => {
     search: search as string | undefined,
     limit: limit ? parseInt(limit as string, 10) : undefined,
     offset: offset ? parseInt(offset as string, 10) : undefined,
-  });
+  };
+
+  const result = await (async () => {
+    if (!isPostgresReady()) {
+      return dataStore.getLogs(filters);
+    }
+
+    try {
+      return await getEventLogs(filters);
+    } catch (error) {
+      console.warn(
+        `PostgreSQL logs query failed; using in-memory fallback: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`,
+      );
+      return dataStore.getLogs(filters);
+    }
+  })();
 
   res.json({
     success: true,
@@ -73,7 +95,24 @@ router.post("/", (req, res) => {
 });
 
 // GET /api/logs/stats - Get log statistics
-router.get("/stats", (_req, res) => {
+router.get("/stats", async (_req, res) => {
+  if (isPostgresReady()) {
+    try {
+      const stats = await getEventLogStats();
+
+      return res.json({
+        success: true,
+        data: stats,
+      });
+    } catch (error) {
+      console.warn(
+        `PostgreSQL log stats query failed; using in-memory fallback: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`,
+      );
+    }
+  }
+
   const allLogs = dataStore.getLogs({ limit: 1000 });
 
   const stats = {

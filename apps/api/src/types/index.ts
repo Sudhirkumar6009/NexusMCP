@@ -113,6 +113,7 @@ export interface AuditLog {
     | "system";
   action: string;
   message: string;
+  executionId?: string;
   details?: Record<string, unknown>;
   workflowId?: string;
   nodeId?: string;
