@@ -49,7 +49,7 @@ The following screenshot paths were added exactly as provided:
 
 Preview links (local file URIs):
 
-![Screenshot 1](file:///C:/Users/Sudhir/OneDrive/Pictures/Screenshots/Screenshot%202026-04-11%20115319.png)
+![Screenshot 1](apps/client/public/1.png)
 ![Screenshot 2](file:///C:/Users/Sudhir/OneDrive/Pictures/Screenshots/Screenshot%202026-04-11%20115548.png)
 ![Screenshot 3](file:///C:/Users/Sudhir/OneDrive/Pictures/Screenshots/Screenshot%202026-04-11%20115833.png)
 
