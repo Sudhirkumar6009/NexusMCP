@@ -23,6 +23,7 @@ export default function AuthCallbackPage() {
     if (token) {
       // Store the token
       localStorage.setItem('auth_token', token);
+      window.dispatchEvent(new Event('auth-token-updated'));
       setStatus('success');
       
       // Redirect to dashboard after a short delay

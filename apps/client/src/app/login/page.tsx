@@ -64,6 +64,7 @@ export default function LoginPage() {
       if (data.success) {
         if (data.data?.token) {
           localStorage.setItem("auth_token", data.data.token);
+          window.dispatchEvent(new Event("auth-token-updated"));
         }
         router.push("/dashboard");
       } else {
@@ -96,6 +97,7 @@ export default function LoginPage() {
         // Store token in localStorage
         if (data.data?.token) {
           localStorage.setItem("auth_token", data.data.token);
+          window.dispatchEvent(new Event("auth-token-updated"));
         }
         router.push("/dashboard");
       } else {
@@ -319,7 +321,7 @@ export default function LoginPage() {
               </div>
             </div>
 
-            <div className="flex items-center justify-between">
+            <div className="flex items-center">
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
                   type="checkbox"
@@ -329,12 +331,6 @@ export default function LoginPage() {
                   Remember me
                 </span>
               </label>
-              <a
-                href="#"
-                className="text-sm text-primary hover:text-primary/80 transition-colors"
-              >
-                Forgot password?
-              </a>
             </div>
 
             <button
