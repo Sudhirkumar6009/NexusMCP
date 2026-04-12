@@ -53,6 +53,13 @@ type ExecutionResult = {
   steps: WebhookStepResult[];
 };
 
+type MissingDetailsPayload = Record<string, string>;
+
+type GithubWorkflowExecutionOptions = {
+  missingDetails?: Record<string, unknown>;
+  retryOfExecutionId?: string;
+};
+
 const GITHUB_DEFAULT_WORKFLOW_ID = "wf-webhook-github-default";
 const GITHUB_DEFAULT_WORKFLOW_NAME = "GitHub Default Webhook Workflow";
 const GITHUB_DEFAULT_WORKFLOW_OWNER =
@@ -80,6 +87,117 @@ function asString(value: unknown): string {
   }
 
   return "";
+}
+
+function normalizeMissingDetailKey(rawKey: string): string {
+  const normalized = rawKey
+    .trim()
+    .toLowerCase()
+    .replace(/["'`]/g, "")
+    .replace(/[\s-]+/g, "_");
+
+  if (!normalized) {
+    return "";
+  }
+
+  if (
+    normalized === "recipient" ||
+    normalized === "recipient_email" ||
+    normalized === "to_email" ||
+    normalized === "email_to" ||
+    normalized === "email_address" ||
+    normalized === "receiver" ||
+    normalized === "receiver_email"
+  ) {
+    return "to";
+  }
+
+  if (normalized === "spreadsheetid" || normalized === "sheetid") {
+    return "sheet_id";
+  }
+
+  return normalized;
+}
+
+function normalizeMissingDetails(
+  payload?: Record<string, unknown>,
+): MissingDetailsPayload {
+  if (!payload) {
+    return {};
+  }
+
+  const normalized: MissingDetailsPayload = {};
+
+  for (const [rawKey, rawValue] of Object.entries(payload)) {
+    const key = rawKey.trim().toLowerCase();
+    const value = asString(rawValue);
+
+    if (!key || !value) {
+      continue;
+    }
+
+    normalized[key] = value;
+  }
+
+  return normalized;
+}
+
+function applyMissingDetailsToPayload(args: {
+  method: string;
+  payload: Record<string, unknown>;
+  missingDetails: MissingDetailsPayload;
+}): Record<string, unknown> {
+  const missingKeys = Object.keys(args.missingDetails);
+  if (missingKeys.length === 0) {
+    return args.payload;
+  }
+
+  const methodName = args.method.trim().toLowerCase();
+  const serviceName = methodName.split(".")[0] || "";
+  const nextPayload: Record<string, unknown> = { ...args.payload };
+
+  for (const [rawScopedKey, value] of Object.entries(args.missingDetails)) {
+    const scopedKey = rawScopedKey.trim().toLowerCase();
+    if (!scopedKey) {
+      continue;
+    }
+
+    let scope = "";
+    let targetKeyRaw = scopedKey;
+
+    const scopeIndex = scopedKey.indexOf(".");
+    if (scopeIndex > 0) {
+      scope = scopedKey.slice(0, scopeIndex);
+      targetKeyRaw = scopedKey.slice(scopeIndex + 1);
+    }
+
+    if (
+      scope &&
+      scope !== "any" &&
+      scope !== "global" &&
+      scope !== serviceName &&
+      scope !== methodName
+    ) {
+      continue;
+    }
+
+    const targetKey = normalizeMissingDetailKey(targetKeyRaw);
+    if (!targetKey) {
+      continue;
+    }
+
+    const existing = nextPayload[targetKey];
+    const isEmpty =
+      existing === undefined ||
+      existing === null ||
+      (typeof existing === "string" && existing.trim().length === 0);
+
+    if (isEmpty) {
+      nextPayload[targetKey] = value;
+    }
+  }
+
+  return nextPayload;
 }
 
 function toAuditService(
@@ -390,7 +508,10 @@ function buildGithubStepPlan(): WorkflowStepPlan[] {
 
 async function executeGithubDefaultWorkflow(
   event: NormalizedWebhookEvent,
+  options?: GithubWorkflowExecutionOptions,
 ): Promise<ExecutionResult> {
+  const missingDetails = normalizeMissingDetails(options?.missingDetails);
+  const missingDetailKeys = Object.keys(missingDetails);
   const context = buildGithubExecutionContext(event);
   const { nodes: initialNodes, edges } = buildGithubWorkflowGraph(context);
   let nodes = initialNodes;
@@ -456,6 +577,13 @@ async function executeGithubDefaultWorkflow(
         source: "webhook",
         trigger: event.event,
         repository: context.repository,
+        eventPayload: {
+          source: event.source,
+          event: event.event,
+          data: event.data,
+        },
+        retryOfExecutionId: options?.retryOfExecutionId,
+        missingDetailKeys,
       },
     });
   } else {
@@ -470,13 +598,18 @@ async function executeGithubDefaultWorkflow(
 
   for (const step of buildGithubStepPlan()) {
     const stepId = `${executionId}:${step.id}`;
-    const inputPayload = {
+    const baseInputPayload = {
       ...step.buildInput(context),
       workflowId,
       executionId,
       stepId,
       trigger: event.event,
     };
+    const inputPayload = applyMissingDetailsToPayload({
+      method: step.method,
+      payload: baseInputPayload,
+      missingDetails,
+    });
 
     nodes = setNodeStatus(nodes, step.nodeId, "running");
     await persistWorkflowSnapshot({
@@ -550,6 +683,7 @@ async function executeGithubDefaultWorkflow(
         input: inputPayload,
         output: outputPayload,
         hasError: !success,
+        missingDetailKeys,
       },
     });
 
@@ -639,7 +773,14 @@ async function executeGithubDefaultWorkflow(
     details: {
       trigger: event.event,
       repository: context.repository,
+      eventPayload: {
+        source: event.source,
+        event: event.event,
+        data: event.data,
+      },
       stepResults,
+      retryOfExecutionId: options?.retryOfExecutionId,
+      missingDetailKeys,
     },
   });
 
@@ -654,10 +795,15 @@ async function executeGithubDefaultWorkflow(
 export async function executeWebhookWorkflow(args: {
   workflow: RoutedWorkflow;
   event: NormalizedWebhookEvent;
+  missingDetails?: Record<string, unknown>;
+  retryOfExecutionId?: string;
 }): Promise<ExecutionResult | null> {
   if (args.workflow !== "GITHUB_START_WORKFLOW") {
     return null;
   }
 
-  return executeGithubDefaultWorkflow(args.event);
+  return executeGithubDefaultWorkflow(args.event, {
+    missingDetails: args.missingDetails,
+    retryOfExecutionId: args.retryOfExecutionId,
+  });
 }

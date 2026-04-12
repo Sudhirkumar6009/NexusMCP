@@ -4,11 +4,15 @@ import type { Workflow } from "../types/index.js";
 import {
   deleteWorkflowDefinition,
   getEventLogs,
+  getStepRuns,
   getWorkflowDefinition,
   isPostgresReady,
   listWorkflowDefinitions,
   saveWorkflowDefinition,
+  type StepRunRecord,
 } from "../services/postgres-store.js";
+import { executeWebhookWorkflow } from "../services/webhook-workflow-executor.js";
+import type { NormalizedWebhookEvent } from "../types/webhook.js";
 
 const router = Router();
 
@@ -401,6 +405,140 @@ function isWebhookWaitingWorkflow(workflow: Workflow): boolean {
     configWaitFor === "webhook" ||
     operation === "on-webhook-event"
   );
+}
+
+function parseMissingDetailValues(payload: unknown): Record<string, string> {
+  const record = asRecord(payload);
+  const normalized: Record<string, string> = {};
+
+  for (const [rawKey, rawValue] of Object.entries(record)) {
+    const key = rawKey.trim().toLowerCase();
+    const value = asString(rawValue);
+
+    if (!key || !value) {
+      continue;
+    }
+
+    normalized[key] = value;
+  }
+
+  return normalized;
+}
+
+function inferWebhookSource(
+  eventName: string,
+): NormalizedWebhookEvent["source"] {
+  const normalized = eventName.trim().toLowerCase();
+  if (normalized.startsWith("jira.")) {
+    return "jira";
+  }
+  if (normalized.startsWith("slack.")) {
+    return "slack";
+  }
+  return "github";
+}
+
+function buildRetryWebhookEventFromStepRuns(
+  stepRuns: StepRunRecord[],
+): NormalizedWebhookEvent {
+  const ordered = [...stepRuns].sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+  );
+
+  let eventName = "";
+  const data: Record<string, unknown> = {};
+
+  for (const step of ordered) {
+    const input = asRecord(step.inputPayload);
+    const row = asRecord(input.row);
+
+    if (!eventName) {
+      eventName = asString(input.trigger) || asString(input.event);
+    }
+
+    const repositoryCandidates = [
+      input.repository,
+      input.repo,
+      row.repository,
+      row.repo,
+    ];
+    const refCandidates = [input.ref, row.ref];
+    const senderCandidates = [input.sender, row.sender];
+    const pusherCandidates = [input.pusher, row.pusher];
+    const beforeCandidates = [input.before, row.before];
+    const afterCandidates = [input.after, row.after];
+
+    if (!data.repository) {
+      for (const candidate of repositoryCandidates) {
+        const value = asString(candidate);
+        if (value) {
+          data.repository = value;
+          break;
+        }
+      }
+    }
+
+    if (!data.ref) {
+      for (const candidate of refCandidates) {
+        const value = asString(candidate);
+        if (value) {
+          data.ref = value;
+          break;
+        }
+      }
+    }
+
+    if (!data.sender) {
+      for (const candidate of senderCandidates) {
+        const value = asString(candidate);
+        if (value) {
+          data.sender = value;
+          break;
+        }
+      }
+    }
+
+    if (!data.pusher) {
+      for (const candidate of pusherCandidates) {
+        const value = asString(candidate);
+        if (value) {
+          data.pusher = value;
+          break;
+        }
+      }
+    }
+
+    if (!data.before) {
+      for (const candidate of beforeCandidates) {
+        const value = asString(candidate);
+        if (value) {
+          data.before = value;
+          break;
+        }
+      }
+    }
+
+    if (!data.after) {
+      for (const candidate of afterCandidates) {
+        const value = asString(candidate);
+        if (value) {
+          data.after = value;
+          break;
+        }
+      }
+    }
+  }
+
+  const fallbackEvent = eventName || "github.retry";
+  if (!data.repository) {
+    data.repository = "unknown-repo";
+  }
+
+  return {
+    source: inferWebhookSource(fallbackEvent),
+    event: fallbackEvent,
+    data,
+  };
 }
 
 function normalizeNodeService(value?: string): WorkflowNodeService {
@@ -1042,6 +1180,123 @@ router.post("/:id/execute", async (req, res) => {
     message: "Workflow execution started",
   });
 });
+
+// POST /api/workflows/executions/:executionId/retry-missing-details
+router.post(
+  "/executions/:executionId/retry-missing-details",
+  async (req, res) => {
+    const executionId = asString(req.params.executionId);
+    const userId = getRequestUserId(req);
+
+    if (!executionId) {
+      return res.status(400).json({
+        success: false,
+        error: "Execution ID is required",
+      });
+    }
+
+    const payloadSource =
+      req.body?.missingDetails && typeof req.body.missingDetails === "object"
+        ? req.body.missingDetails
+        : req.body?.details && typeof req.body.details === "object"
+          ? req.body.details
+          : req.body;
+
+    const missingDetails = parseMissingDetailValues(payloadSource);
+    if (Object.keys(missingDetails).length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "At least one missing detail value is required",
+      });
+    }
+
+    if (!isPostgresReady()) {
+      return res.status(503).json({
+        success: false,
+        error:
+          "Retry requires PostgreSQL step run history. Please ensure PostgreSQL is ready.",
+      });
+    }
+
+    const stepRunResult = await getStepRuns({
+      executionId,
+      limit: 500,
+      offset: 0,
+    });
+
+    if (stepRunResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "Execution step history was not found",
+      });
+    }
+
+    const workflowId =
+      stepRunResult.rows.find(
+        (step) => typeof step.workflowId === "string" && step.workflowId.trim(),
+      )?.workflowId ?? "";
+
+    if (!workflowId) {
+      return res.status(404).json({
+        success: false,
+        error: "Workflow for this execution could not be resolved",
+      });
+    }
+
+    const routedWorkflow =
+      workflowId === "GITHUB_START_WORKFLOW" ||
+      workflowId === "wf-webhook-github-default"
+        ? "GITHUB_START_WORKFLOW"
+        : null;
+
+    if (!routedWorkflow) {
+      return res.status(400).json({
+        success: false,
+        error:
+          "Retry with missing details is currently available for the GitHub default webhook workflow only.",
+      });
+    }
+
+    const retryEvent = buildRetryWebhookEventFromStepRuns(stepRunResult.rows);
+    const retriedExecution = await executeWebhookWorkflow({
+      workflow: routedWorkflow,
+      event: retryEvent,
+      missingDetails,
+      retryOfExecutionId: executionId,
+    });
+
+    if (!retriedExecution) {
+      return res.status(500).json({
+        success: false,
+        error: "Failed to start retry execution",
+      });
+    }
+
+    dataStore.addLog({
+      level: "info",
+      service: "system",
+      action: "workflow_retry_requested",
+      message: `Retry requested for execution ${executionId}`,
+      workflowId: retriedExecution.workflowId,
+      executionId: retriedExecution.executionId,
+      userId,
+      details: {
+        retryOfExecutionId: executionId,
+        triggerEvent: retryEvent.event,
+        missingDetails,
+      },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        previousExecutionId: executionId,
+        ...retriedExecution,
+      },
+      message: "Workflow retry execution started",
+    });
+  },
+);
 
 // POST /api/workflows/:id/pause - Pause a running workflow
 router.post("/:id/pause", async (req, res) => {

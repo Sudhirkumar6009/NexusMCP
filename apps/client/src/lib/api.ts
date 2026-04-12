@@ -138,6 +138,18 @@ export const workflowsApi = {
   execute: (id: string) =>
     fetchApi<WorkflowExecution>(`/workflows/${id}/execute`, { method: "POST" }),
 
+  retryMissingDetails: (
+    executionId: string,
+    missingDetails: Record<string, string>,
+  ) =>
+    fetchApi<WorkflowRetryResult>(
+      `/workflows/executions/${encodeURIComponent(executionId)}/retry-missing-details`,
+      {
+        method: "POST",
+        body: JSON.stringify({ missingDetails }),
+      },
+    ),
+
   pause: (id: string) =>
     fetchApi<Workflow>(`/workflows/${id}/pause`, { method: "POST" }),
 
@@ -464,6 +476,21 @@ interface WorkflowExecution {
   completedAt?: string;
   currentNodeId?: string;
   nodeResults: Record<string, NodeExecutionResult>;
+}
+
+interface WorkflowRetryResult {
+  previousExecutionId: string;
+  workflowId: string;
+  executionId: string;
+  status: "completed" | "failed";
+  steps: Array<{
+    id: string;
+    nodeId: string;
+    method: string;
+    status: "success" | "failed";
+    output?: unknown;
+    error?: string;
+  }>;
 }
 
 interface NodeExecutionResult {

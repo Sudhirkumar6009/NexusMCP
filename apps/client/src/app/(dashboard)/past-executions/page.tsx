@@ -3,13 +3,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
-  CheckCircle2,
   Clock3,
   FileJson,
   Loader2,
   RefreshCw,
   Search,
-  XCircle,
 } from "lucide-react";
 
 import {
@@ -28,6 +26,8 @@ import {
   CardHeader,
   CardTitle,
   Input,
+  Modal,
+  ModalFooter,
   Select,
   Table,
   TableBody,
@@ -61,6 +61,14 @@ type ExecutionView = {
   triggerPayload: Record<string, unknown>;
   logs: AuditLog[];
   stepRuns: StepRun[];
+};
+
+type MissingDetailPrompt = {
+  key: string;
+  label: string;
+  reason: string;
+  toolName: string;
+  stepId: string;
 };
 
 type GroupAccumulator = {
@@ -116,6 +124,192 @@ function statusVariant(
   if (status === "failed") return "error";
   if (status === "running") return "info";
   return "default";
+}
+
+function normalizeMissingFieldKey(rawField: string): string {
+  const normalized = rawField
+    .trim()
+    .toLowerCase()
+    .replace(/["'`]/g, "")
+    .replace(/[\s-]+/g, "_")
+    .replace(/[^a-z0-9_.]/g, "")
+    .replace(/^_+|_+$/g, "");
+
+  if (!normalized) {
+    return "";
+  }
+
+  if (
+    normalized === "recipient" ||
+    normalized === "recipient_email" ||
+    normalized === "to_email" ||
+    normalized === "email_to" ||
+    normalized === "email_address" ||
+    normalized === "receiver" ||
+    normalized === "receiver_email"
+  ) {
+    return "to";
+  }
+
+  if (normalized === "sheetid" || normalized === "spreadsheetid") {
+    return "sheet_id";
+  }
+
+  return normalized;
+}
+
+function missingFieldLabel(fieldKey: string): string {
+  if (fieldKey === "to") {
+    return "Recipient Email (to)";
+  }
+
+  if (fieldKey === "cc") {
+    return "CC Email";
+  }
+
+  if (fieldKey === "bcc") {
+    return "BCC Email";
+  }
+
+  if (fieldKey === "channel") {
+    return "Slack Channel";
+  }
+
+  if (fieldKey === "project") {
+    return "Jira Project";
+  }
+
+  if (fieldKey === "sheet_id") {
+    return "Spreadsheet ID";
+  }
+
+  if (fieldKey === "sheet_name") {
+    return "Sheet Name";
+  }
+
+  return fieldKey
+    .split(/[._]/g)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function extractErrorMessage(step: StepRun): string {
+  if (typeof step.outputPayload === "string") {
+    return step.outputPayload.trim();
+  }
+
+  const outputPayload = asRecord(step.outputPayload);
+  const nestedError = asRecord(outputPayload.error);
+
+  const messageCandidates = [
+    nestedError.message,
+    outputPayload.message,
+    outputPayload.errorMessage,
+    outputPayload.detail,
+  ];
+
+  for (const candidate of messageCandidates) {
+    const message = asString(candidate);
+    if (message) {
+      return message;
+    }
+  }
+
+  return "";
+}
+
+function fallbackFieldForTool(toolName: string): string {
+  const normalized = toolName.trim().toLowerCase();
+  if (normalized.startsWith("gmail.")) {
+    return "to";
+  }
+  if (normalized.startsWith("slack.")) {
+    return "channel";
+  }
+  if (normalized.startsWith("jira.")) {
+    return "project";
+  }
+  if (
+    normalized.startsWith("sheets.") ||
+    normalized.startsWith("google_sheets.")
+  ) {
+    return "sheet_id";
+  }
+  return "details";
+}
+
+function extractMissingFieldKeys(message: string): string[] {
+  const fieldKeys = new Set<string>();
+
+  for (const match of message.matchAll(/\(([^)]+)\)/g)) {
+    const captured = match[1] || "";
+    const parts = captured.split(/[,/]|\band\b/gi);
+
+    for (const part of parts) {
+      const key = normalizeMissingFieldKey(part);
+      if (key) {
+        fieldKeys.add(key);
+      }
+    }
+  }
+
+  for (const match of message.matchAll(
+    /(?:missing|required)\s+(?:field|parameter|value)?\s*[:\-]?\s*([a-z0-9_.\-\s,]+)/gi,
+  )) {
+    const captured = match[1] || "";
+    const parts = captured.split(/[,/]|\band\b/gi);
+
+    for (const part of parts) {
+      const key = normalizeMissingFieldKey(part);
+      if (key) {
+        fieldKeys.add(key);
+      }
+    }
+  }
+
+  return [...fieldKeys];
+}
+
+function detectMissingDetailPrompts(
+  stepRuns: StepRun[],
+): MissingDetailPrompt[] {
+  const promptsByKey = new Map<string, MissingDetailPrompt>();
+
+  for (const step of stepRuns) {
+    const status = asString(step.status).toLowerCase();
+    if (status !== "failed" && status !== "error") {
+      continue;
+    }
+
+    const message = extractErrorMessage(step);
+    const mentionsMissing = /missing|require/i.test(message);
+    if (!mentionsMissing) {
+      continue;
+    }
+
+    const extractedKeys = extractMissingFieldKeys(message);
+    const candidateKeys =
+      extractedKeys.length > 0
+        ? extractedKeys
+        : [fallbackFieldForTool(step.toolName)];
+
+    for (const key of candidateKeys) {
+      if (!key || promptsByKey.has(key)) {
+        continue;
+      }
+
+      promptsByKey.set(key, {
+        key,
+        label: missingFieldLabel(key),
+        reason: message || `Missing detail detected for ${step.toolName}`,
+        toolName: step.toolName,
+        stepId: step.stepId,
+      });
+    }
+  }
+
+  return [...promptsByKey.values()];
 }
 
 function pickTriggerPayload(
@@ -367,6 +561,14 @@ export default function PastExecutionsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isMissingDetailsModalOpen, setIsMissingDetailsModalOpen] =
+    useState(false);
+  const [missingDetailValues, setMissingDetailValues] = useState<
+    Record<string, string>
+  >({});
+  const [retryError, setRetryError] = useState<string | null>(null);
+  const [retryInfo, setRetryInfo] = useState<string | null>(null);
+  const [isRetrying, setIsRetrying] = useState(false);
 
   const loadData = useCallback(async () => {
     setIsRefreshing(true);
@@ -518,6 +720,108 @@ export default function PastExecutionsPage() {
       ["failed", "error"].includes(step.status.toLowerCase()),
     );
   }, [selectedExecution]);
+
+  const missingDetailPrompts = useMemo(
+    () => detectMissingDetailPrompts(selectedFailedSteps),
+    [selectedFailedSteps],
+  );
+
+  const missingPromptSignature = useMemo(
+    () => missingDetailPrompts.map((prompt) => prompt.key).join("|"),
+    [missingDetailPrompts],
+  );
+
+  useEffect(() => {
+    const nextValues: Record<string, string> = {};
+    for (const prompt of missingDetailPrompts) {
+      nextValues[prompt.key] = "";
+    }
+
+    setMissingDetailValues(nextValues);
+    setRetryError(null);
+    setRetryInfo(null);
+    setIsMissingDetailsModalOpen(false);
+  }, [missingPromptSignature, selectedExecutionId]);
+
+  const openMissingDetailsModal = useCallback(() => {
+    setRetryError(null);
+    setRetryInfo(null);
+    setIsMissingDetailsModalOpen(true);
+  }, []);
+
+  const updateMissingDetailValue = useCallback((key: string, value: string) => {
+    setMissingDetailValues((current) => ({
+      ...current,
+      [key]: value,
+    }));
+  }, []);
+
+  const submitMissingDetailsRetry = useCallback(() => {
+    if (isRetrying) {
+      return;
+    }
+
+    if (!selectedExecution) {
+      return;
+    }
+
+    const payload: Record<string, string> = {};
+    for (const prompt of missingDetailPrompts) {
+      const value = (missingDetailValues[prompt.key] || "").trim();
+      if (value) {
+        payload[prompt.key] = value;
+      }
+    }
+
+    const missingKeys = missingDetailPrompts
+      .map((prompt) => prompt.key)
+      .filter((key) => !payload[key]);
+
+    if (missingKeys.length > 0) {
+      setRetryError(
+        `Please provide values for: ${missingKeys
+          .map((key) => missingFieldLabel(key))
+          .join(", ")}`,
+      );
+      return;
+    }
+
+    // Close immediately so rerun happens in background without blocking the user.
+    setIsMissingDetailsModalOpen(false);
+    setIsRetrying(true);
+    setRetryError(null);
+    setRetryInfo("Re-run started in background. You can continue working.");
+
+    const selectedExecutionIdForRetry = selectedExecution.executionId;
+    void (async () => {
+      try {
+        const response = await workflowsApi.retryMissingDetails(
+          selectedExecutionIdForRetry,
+          payload,
+        );
+
+        if (!response.success || !response.data) {
+          setRetryInfo(null);
+          setRetryError(response.error || "Failed to retry execution.");
+          return;
+        }
+
+        setRetryInfo(
+          `Background re-run queued as execution ${response.data.executionId}.`,
+        );
+        await loadData();
+        setSelectedExecutionId(response.data.executionId);
+      } finally {
+        setIsRetrying(false);
+      }
+    })();
+  }, [
+    isRetrying,
+    loadData,
+    missingDetailPrompts,
+    missingDetailValues,
+    selectedExecution,
+  ]);
 
   const executionJson = useMemo(() => {
     if (!selectedExecution) {
@@ -799,6 +1103,50 @@ export default function PastExecutionsPage() {
               </CardHeader>
 
               <CardContent className="space-y-4">
+                {missingDetailPrompts.length > 0 ? (
+                  <div className="animate-pulse rounded-md border-2 border-error/70 bg-error/15 p-3 shadow-sm">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="flex items-center gap-2 text-sm font-semibold text-error">
+                          <AlertCircle className="h-4 w-4" />
+                          Missing Details Required
+                        </p>
+                        <p className="mt-1 text-sm text-content-primary">
+                          This execution failed because required inputs are
+                          missing. Click below, provide details, and rerun.
+                        </p>
+                        <p className="mt-2 text-xs text-content-secondary">
+                          Required:{" "}
+                          {missingDetailPrompts
+                            .map((prompt) => prompt.label)
+                            .join(", ")}
+                        </p>
+                      </div>
+
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        onClick={openMissingDetailsModal}
+                      >
+                        Fix Missing Details
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {retryInfo ? (
+                  <p className="flex items-center gap-2 text-sm text-success">
+                    {isRetrying ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : null}
+                    {retryInfo}
+                  </p>
+                ) : null}
+
+                {retryError ? (
+                  <p className="text-sm text-error">{retryError}</p>
+                ) : null}
+
                 <div>
                   <p className="mb-2 text-sm font-medium text-content-primary">
                     Audit Errors ({selectedErrorLogs.length})
@@ -918,6 +1266,71 @@ export default function PastExecutionsPage() {
           </div>
         </div>
       ) : null}
+
+      <Modal
+        isOpen={isMissingDetailsModalOpen}
+        onClose={() => setIsMissingDetailsModalOpen(false)}
+        title="Missing Details"
+        description="Provide required values and rerun this failed execution."
+        size="lg"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-content-secondary">
+            This run failed because one or more required fields were missing.
+            Add the values below, then rerun.
+          </p>
+
+          {missingDetailPrompts.length === 0 ? (
+            <p className="text-sm text-content-secondary">
+              No missing fields are currently detected for this execution.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {missingDetailPrompts.map((prompt) => (
+                <div
+                  key={prompt.key}
+                  className="rounded-md border border-border p-3"
+                >
+                  <Input
+                    label={prompt.label}
+                    value={missingDetailValues[prompt.key] || ""}
+                    placeholder={`Enter ${prompt.label.toLowerCase()}`}
+                    onChange={(event) =>
+                      updateMissingDetailValue(prompt.key, event.target.value)
+                    }
+                  />
+                  <p className="mt-2 text-xs text-content-secondary">
+                    {prompt.toolName} • {prompt.stepId}
+                  </p>
+                  <p className="mt-1 text-xs text-content-secondary">
+                    {prompt.reason}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {retryError ? (
+            <p className="text-sm text-error">{retryError}</p>
+          ) : null}
+
+          <ModalFooter>
+            <Button
+              variant="outline"
+              onClick={() => setIsMissingDetailsModalOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              isLoading={isRetrying}
+              onClick={() => void submitMissingDetailsRetry()}
+            >
+              Save Details and Re-run
+            </Button>
+          </ModalFooter>
+        </div>
+      </Modal>
     </div>
   );
 }
