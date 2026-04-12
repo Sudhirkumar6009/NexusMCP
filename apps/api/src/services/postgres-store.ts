@@ -54,8 +54,11 @@ export type ServiceConnectionRecord = {
 
 let postgresReady = false;
 
-const schemaStatements = [
+const optionalSchemaStatements = [
   `CREATE EXTENSION IF NOT EXISTS "pgcrypto";`,
+];
+
+const requiredSchemaStatements = [
   `CREATE TABLE IF NOT EXISTS workflow_definitions (
       workflow_id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -186,7 +189,19 @@ export async function initPostgresStore(): Promise<boolean> {
 
   await testPostgresConnection();
 
-  for (const statement of schemaStatements) {
+  for (const statement of optionalSchemaStatements) {
+    try {
+      await query(statement);
+    } catch (error) {
+      console.warn(
+        `[PostgreSQL] Optional schema statement failed and was skipped: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`,
+      );
+    }
+  }
+
+  for (const statement of requiredSchemaStatements) {
     await query(statement);
   }
 

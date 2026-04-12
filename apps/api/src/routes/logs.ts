@@ -4,11 +4,51 @@ import {
   getEventLogs,
   getEventLogStats,
   getStepRuns,
+  initPostgresStore,
   isPostgresReady,
   type StepRunRecord,
 } from "../services/postgres-store.js";
 
 const router = Router();
+
+function toPositiveInt(
+  value: unknown,
+  fallback: number,
+  options?: { min?: number; max?: number },
+): number {
+  const numeric =
+    typeof value === "string" ? Number.parseInt(value, 10) : Number(value);
+
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+
+  const floored = Math.floor(numeric);
+  const min = options?.min ?? Number.MIN_SAFE_INTEGER;
+  const max = options?.max ?? Number.MAX_SAFE_INTEGER;
+
+  if (floored < min) {
+    return min;
+  }
+
+  if (floored > max) {
+    return max;
+  }
+
+  return floored;
+}
+
+async function ensurePostgresReady(): Promise<boolean> {
+  if (isPostgresReady()) {
+    return true;
+  }
+
+  try {
+    return await initPostgresStore();
+  } catch {
+    return false;
+  }
+}
 
 function mapLogsToStepRunsFallback(limit: number, offset: number) {
   const source = dataStore.getLogs({ limit: 1000, offset: 0 }).logs;
@@ -41,6 +81,8 @@ function mapLogsToStepRunsFallback(limit: number, offset: number) {
 // GET /api/logs - List audit logs with filtering
 router.get("/", async (req, res) => {
   const { level, service, search, workflowId, limit, offset } = req.query;
+  const parsedLimit = toPositiveInt(limit, 50, { min: 1, max: 1000 });
+  const parsedOffset = toPositiveInt(offset, 0, { min: 0, max: 1000000 });
 
   const filters = {
     level: level as "info" | "warning" | "error" | "debug" | undefined,
@@ -55,11 +97,11 @@ router.get("/", async (req, res) => {
       | undefined,
     search: search as string | undefined,
     workflowId: workflowId as string | undefined,
-    limit: limit ? parseInt(limit as string, 10) : undefined,
-    offset: offset ? parseInt(offset as string, 10) : undefined,
+    limit: parsedLimit,
+    offset: parsedOffset,
   };
 
-  if (!isPostgresReady()) {
+  if (!(await ensurePostgresReady())) {
     return res.status(503).json({
       success: false,
       error:
@@ -85,8 +127,8 @@ router.get("/", async (req, res) => {
     data: result.logs,
     pagination: {
       total: result.total,
-      limit: limit ? parseInt(limit as string, 10) : 50,
-      offset: offset ? parseInt(offset as string, 10) : 0,
+      limit: parsedLimit,
+      offset: parsedOffset,
     },
   });
 });
@@ -132,21 +174,19 @@ router.post("/", (req, res) => {
 router.get("/step-runs", async (req, res) => {
   const { executionId, workflowId, status, search, limit, offset } = req.query;
 
-  const parsedLimit = limit ? parseInt(limit as string, 10) : 100;
-  const parsedOffset = offset ? parseInt(offset as string, 10) : 0;
+  const parsedLimit = toPositiveInt(limit, 100, { min: 1, max: 500 });
+  const parsedOffset = toPositiveInt(offset, 0, { min: 0, max: 1000000 });
 
   const filters = {
     executionId: typeof executionId === "string" ? executionId : undefined,
     workflowId: typeof workflowId === "string" ? workflowId : undefined,
     status: typeof status === "string" ? status : undefined,
     search: typeof search === "string" ? search : undefined,
-    limit: Number.isFinite(parsedLimit)
-      ? Math.min(Math.max(parsedLimit, 1), 500)
-      : 100,
-    offset: Number.isFinite(parsedOffset) ? Math.max(parsedOffset, 0) : 0,
+    limit: parsedLimit,
+    offset: parsedOffset,
   };
 
-  if (isPostgresReady()) {
+  if (await ensurePostgresReady()) {
     try {
       const result = await getStepRuns(filters);
 
@@ -185,7 +225,7 @@ router.get("/step-runs", async (req, res) => {
 
 // GET /api/logs/stats - Get log statistics
 router.get("/stats", async (_req, res) => {
-  if (!isPostgresReady()) {
+  if (!(await ensurePostgresReady())) {
     return res.status(503).json({
       success: false,
       error:
