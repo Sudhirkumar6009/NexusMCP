@@ -9,6 +9,15 @@ import { User, IUser } from "../models/User.js";
 
 const router = Router();
 
+router.use(async (_req, _res, next) => {
+  try {
+    await dataStore.hydrateSharedIntegrationMemory();
+  } catch {
+    // Continue with in-memory state when PostgreSQL-backed hydration is unavailable.
+  }
+  next();
+});
+
 const integrationIdAliases: Record<string, string> = {
   jira: "int-jira",
   slack: "int-slack",

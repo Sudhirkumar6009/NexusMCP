@@ -24,6 +24,7 @@ import webhookRoutes from "./routes/webhooks.js";
 import { initPostgresStore } from "./services/postgres-store.js";
 import { startWebhookQueueWorker } from "./services/webhook-queue.js";
 import { getAlwaysOnWorkflowConfig } from "./services/workflow-trigger.js";
+import { dataStore } from "./data/store.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -210,6 +211,9 @@ async function startServer() {
 
     try {
       postgresConnected = await initPostgresStore();
+      if (postgresConnected) {
+        await dataStore.hydrateSharedIntegrationMemory();
+      }
     } catch (error) {
       if (process.env.NODE_ENV === "production") {
         throw error;

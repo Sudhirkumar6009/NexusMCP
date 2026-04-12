@@ -45,6 +45,13 @@ export type StepRunRecord = {
   updatedAt: string;
 };
 
+export type ServiceConnectionRecord = {
+  connectionId: string;
+  serviceName: string;
+  credentials?: Record<string, unknown>;
+  updatedAt: string;
+};
+
 let postgresReady = false;
 
 const schemaStatements = [
@@ -90,11 +97,13 @@ const schemaStatements = [
   `CREATE TABLE IF NOT EXISTS service_connections (
       connection_id TEXT PRIMARY KEY,
       service_name TEXT NOT NULL UNIQUE,
+      credentials_json JSONB,
       api_key_encrypted TEXT,
       token_encrypted TEXT,
       scopes JSONB,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );`,
+  `ALTER TABLE service_connections ADD COLUMN IF NOT EXISTS credentials_json JSONB;`,
   `CREATE TABLE IF NOT EXISTS event_logs (
       log_id TEXT PRIMARY KEY,
       execution_id TEXT REFERENCES workflow_executions(execution_id) ON DELETE SET NULL,
@@ -451,6 +460,7 @@ export async function registerMcpTool(args: {
 export async function saveServiceConnection(args: {
   connectionId: string;
   serviceName: string;
+  credentials?: Record<string, unknown>;
   apiKey?: string;
   token?: string;
   scopes?: string[];
@@ -458,11 +468,12 @@ export async function saveServiceConnection(args: {
   if (!postgresReady) return;
 
   await query(
-    `INSERT INTO service_connections (connection_id, service_name, api_key_encrypted, token_encrypted, scopes, updated_at)
-     VALUES ($1, $2, $3, $4, $5::jsonb, NOW())
+    `INSERT INTO service_connections (connection_id, service_name, credentials_json, api_key_encrypted, token_encrypted, scopes, updated_at)
+     VALUES ($1, $2, $3::jsonb, $4, $5, $6::jsonb, NOW())
      ON CONFLICT (service_name)
      DO UPDATE SET
        connection_id = EXCLUDED.connection_id,
+       credentials_json = EXCLUDED.credentials_json,
        api_key_encrypted = EXCLUDED.api_key_encrypted,
        token_encrypted = EXCLUDED.token_encrypted,
        scopes = EXCLUDED.scopes,
@@ -470,11 +481,34 @@ export async function saveServiceConnection(args: {
     [
       args.connectionId,
       args.serviceName,
+      args.credentials ? JSON.stringify(args.credentials) : null,
       encryptedSecret(args.apiKey),
       encryptedSecret(args.token),
       JSON.stringify(args.scopes ?? []),
     ],
   );
+}
+
+export async function listServiceConnections(): Promise<ServiceConnectionRecord[]> {
+  if (!postgresReady) {
+    return [];
+  }
+
+  const result = await query(
+    `SELECT connection_id, service_name, credentials_json, updated_at
+     FROM service_connections
+     ORDER BY updated_at DESC`,
+  );
+
+  return result.rows.map((row) => ({
+    connectionId: String(row.connection_id),
+    serviceName: String(row.service_name),
+    credentials:
+      row.credentials_json && typeof row.credentials_json === "object"
+        ? (row.credentials_json as Record<string, unknown>)
+        : undefined,
+    updatedAt: new Date(row.updated_at).toISOString(),
+  }));
 }
 
 export async function saveEventLog(log: AuditLog): Promise<void> {

@@ -9,6 +9,7 @@ import type {
   WorkflowExecution,
 } from "../types/index.js";
 import {
+  listServiceConnections,
   saveEventLog,
   saveServiceConnection,
   saveWorkflowDefinition,
@@ -467,6 +468,41 @@ class DataStore {
   }
 
   // Integration methods
+  async hydrateSharedIntegrationMemory(): Promise<void> {
+    const persistedConnections = await listServiceConnections();
+    if (persistedConnections.length === 0) {
+      return;
+    }
+
+    const integrationsByService = new Map(
+      Array.from(this.integrations.values()).map((integration) => [
+        integration.service,
+        integration,
+      ]),
+    );
+
+    for (const connection of persistedConnections) {
+      const integration = integrationsByService.get(
+        connection.serviceName as Integration["service"],
+      );
+      if (!integration) {
+        continue;
+      }
+
+      const credentials =
+        connection.credentials && Object.keys(connection.credentials).length > 0
+          ? (connection.credentials as Integration["credentials"])
+          : undefined;
+
+      this.integrations.set(integration.id, {
+        ...integration,
+        credentials,
+        status: credentials ? "connected" : "disconnected",
+        lastSync: credentials ? connection.updatedAt : undefined,
+      });
+    }
+  }
+
   getIntegrations(): Integration[] {
     return Array.from(this.integrations.values());
   }
@@ -514,6 +550,7 @@ class DataStore {
     void saveServiceConnection({
       connectionId: id,
       serviceName: updated.service,
+      credentials: credentials as Record<string, unknown>,
       apiKey: credentials?.apiKey || credentials?.username,
       token:
         credentials?.accessToken ||
@@ -547,6 +584,7 @@ class DataStore {
     void saveServiceConnection({
       connectionId: id,
       serviceName: updated.service,
+      credentials: undefined,
       scopes: [],
     }).catch((error) => {
       console.error("PostgreSQL connection clear failed:", error);
