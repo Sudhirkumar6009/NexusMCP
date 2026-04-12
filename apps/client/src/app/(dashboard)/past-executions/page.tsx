@@ -579,6 +579,7 @@ export default function PastExecutionsPage() {
   const [retryInfo, setRetryInfo] = useState<string | null>(null);
   const [isRetrying, setIsRetrying] = useState(false);
   const autoRetriedExecutionIdsRef = useRef<Set<string>>(new Set());
+  const retryInFlightExecutionIdRef = useRef<string | null>(null);
 
   const loadData = useCallback(async () => {
     setIsRefreshing(true);
@@ -745,12 +746,15 @@ export default function PastExecutionsPage() {
     let isActive = true;
 
     const hydrateMissingDetailValues = async () => {
+      const keys = missingPromptSignature
+        ? missingPromptSignature.split("|").filter(Boolean)
+        : [];
+
       const nextValues: Record<string, string> = {};
-      for (const prompt of missingDetailPrompts) {
-        nextValues[prompt.key] = "";
+      for (const key of keys) {
+        nextValues[key] = "";
       }
 
-      const keys = missingDetailPrompts.map((prompt) => prompt.key);
       const prefilledKeys: string[] = [];
 
       if (keys.length > 0) {
@@ -793,7 +797,7 @@ export default function PastExecutionsPage() {
     return () => {
       isActive = false;
     };
-  }, [missingDetailPrompts, missingPromptSignature, selectedExecutionId]);
+  }, [missingPromptSignature, selectedExecutionId]);
 
   const openMissingDetailsModal = useCallback(() => {
     setRetryError(null);
@@ -814,9 +818,11 @@ export default function PastExecutionsPage() {
       payload: Record<string, string>;
       autoTriggered?: boolean;
     }) => {
-      if (isRetrying) {
+      if (retryInFlightExecutionIdRef.current) {
         return;
       }
+
+      retryInFlightExecutionIdRef.current = args.executionId;
 
       // Close immediately so rerun happens in background without blocking the user.
       setIsMissingDetailsModalOpen(false);
@@ -840,11 +846,8 @@ export default function PastExecutionsPage() {
             setRetryInfo(null);
             setRetryError(response.error || "Failed to retry execution.");
 
-            if (args.autoTriggered) {
-              autoRetriedExecutionIdsRef.current.delete(
-                selectedExecutionIdForRetry,
-              );
-            }
+            // Keep the auto-trigger guard even on failure to avoid runaway retries.
+            // User can still trigger manual retry after updating details.
 
             return;
           }
@@ -856,10 +859,16 @@ export default function PastExecutionsPage() {
           setSelectedExecutionId(response.data.executionId);
         } finally {
           setIsRetrying(false);
+
+          if (
+            retryInFlightExecutionIdRef.current === selectedExecutionIdForRetry
+          ) {
+            retryInFlightExecutionIdRef.current = null;
+          }
         }
       })();
     },
-    [isRetrying, loadData],
+    [loadData],
   );
 
   const submitMissingDetailsRetry = useCallback(() => {
@@ -905,11 +914,17 @@ export default function PastExecutionsPage() {
   ]);
 
   useEffect(() => {
-    if (!selectedExecution || isRetrying || missingDetailPrompts.length === 0) {
+    const executionId = selectedExecution?.executionId;
+    if (
+      !executionId ||
+      isRetrying ||
+      retryInFlightExecutionIdRef.current ||
+      !missingPromptSignature
+    ) {
       return;
     }
 
-    const requiredKeys = missingDetailPrompts.map((prompt) => prompt.key);
+    const requiredKeys = missingPromptSignature.split("|").filter(Boolean);
     const prefilledSet = new Set(prefilledMissingKeys);
     const payload: Record<string, string> = {};
 
@@ -928,7 +943,6 @@ export default function PastExecutionsPage() {
       return;
     }
 
-    const executionId = selectedExecution.executionId;
     if (autoRetriedExecutionIdsRef.current.has(executionId)) {
       return;
     }
@@ -941,10 +955,10 @@ export default function PastExecutionsPage() {
     });
   }, [
     isRetrying,
-    missingDetailPrompts,
+    missingPromptSignature,
     missingDetailValues,
     prefilledMissingKeys,
-    selectedExecution,
+    selectedExecution?.executionId,
     startMissingDetailsRetry,
   ]);
 

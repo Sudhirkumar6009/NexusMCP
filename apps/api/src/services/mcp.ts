@@ -30,6 +30,10 @@ type JiraConfig = {
   apiToken: string;
 };
 
+const JIRA_NEW_ISSUE_DEFAULT_STATUS = (
+  process.env.JIRA_NEW_ISSUE_DEFAULT_STATUS ?? "In Progress"
+).trim();
+
 type SlackConfig = {
   token: string;
 };
@@ -2187,7 +2191,13 @@ async function resolveJiraTransitionId(
   const matched = transitions.find((entry) => {
     const transition = parseBodyAsRecord(entry);
     const name = pickString(transition, ["name"]);
-    return Boolean(name && normalizeTransitionName(name) === targetName);
+    const to = parseBodyAsRecord(transition.to);
+    const toName = pickString(to, ["name"]);
+
+    return Boolean(
+      (name && normalizeTransitionName(name) === targetName) ||
+      (toName && normalizeTransitionName(toName) === targetName),
+    );
   });
 
   if (matched) {
@@ -2281,6 +2291,59 @@ const handlers: Record<string, MCPHandler> = {
         },
       });
 
+      const createdIssueKey = pickString(responsePayload, ["key"]);
+      const initialStatus =
+        pickString(payload, ["initial_status", "initialStatus", "status"]) ||
+        JIRA_NEW_ISSUE_DEFAULT_STATUS;
+
+      if (createdIssueKey && initialStatus) {
+        try {
+          const transitionId = await resolveJiraTransitionId(
+            config,
+            createdIssueKey,
+            initialStatus,
+          );
+
+          await jiraRequest(
+            config,
+            "POST",
+            `/rest/api/3/issue/${encodeURIComponent(createdIssueKey)}/transitions`,
+            {
+              transition: {
+                id: transitionId,
+              },
+            },
+          );
+
+          dataStore.addLog({
+            level: "info",
+            service: "jira",
+            action: "create_issue_transition",
+            message: `Moved issue ${createdIssueKey} to ${initialStatus}`,
+            details: {
+              issueKey: createdIssueKey,
+              status: initialStatus,
+              transitionId,
+            },
+          });
+        } catch (transitionError) {
+          dataStore.addLog({
+            level: "warning",
+            service: "jira",
+            action: "create_issue_transition_skipped",
+            message: `Issue ${createdIssueKey} created but status auto-transition to ${initialStatus} failed`,
+            details: {
+              issueKey: createdIssueKey,
+              status: initialStatus,
+              error:
+                transitionError instanceof Error
+                  ? transitionError.message
+                  : "Unknown Jira transition error",
+            },
+          });
+        }
+      }
+
       dataStore.addLog({
         level: "info",
         service: "jira",
@@ -2312,11 +2375,41 @@ const handlers: Record<string, MCPHandler> = {
           },
         );
 
+        const gatewayIssueKey =
+          (gatewayResult.issue_key as string | undefined) ||
+          (gatewayResult.issueKey as string | undefined) ||
+          "";
+        const initialStatus =
+          pickString(payload, ["initial_status", "initialStatus", "status"]) ||
+          JIRA_NEW_ISSUE_DEFAULT_STATUS;
+
+        if (gatewayIssueKey && initialStatus) {
+          try {
+            await invokeGatewayTool("jira", "jira.update_issue", {
+              issue_key: gatewayIssueKey,
+              status: initialStatus,
+              comment: `Auto-transitioned by NexusMCP after creation to ${initialStatus}.`,
+            });
+          } catch (transitionError) {
+            dataStore.addLog({
+              level: "warning",
+              service: "jira",
+              action: "create_issue_transition_skipped",
+              message: `Gateway-created issue ${gatewayIssueKey} could not be moved to ${initialStatus}`,
+              details: {
+                issueKey: gatewayIssueKey,
+                status: initialStatus,
+                error:
+                  transitionError instanceof Error
+                    ? transitionError.message
+                    : "Unknown gateway transition error",
+              },
+            });
+          }
+        }
+
         return {
-          issueKey:
-            (gatewayResult.issue_key as string | undefined) ||
-            (gatewayResult.issueKey as string | undefined) ||
-            "UNKNOWN",
+          issueKey: gatewayIssueKey || "UNKNOWN",
           issueId:
             (gatewayResult.issue_id as string | undefined) ||
             (gatewayResult.issueId as string | undefined) ||

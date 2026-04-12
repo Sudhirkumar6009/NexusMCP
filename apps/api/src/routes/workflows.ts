@@ -17,7 +17,10 @@ import {
   type StepRunRecord,
 } from "../services/postgres-store.js";
 import { executeWebhookWorkflow } from "../services/webhook-workflow-executor.js";
-import type { NormalizedWebhookEvent } from "../types/webhook.js";
+import type {
+  NormalizedWebhookEvent,
+  RoutedWorkflow,
+} from "../types/webhook.js";
 
 const router = Router();
 
@@ -608,8 +611,48 @@ function inferWebhookSource(
   return "github";
 }
 
+function resolveRetryRoutedWorkflow(workflowId: string): RoutedWorkflow | null {
+  const normalized = workflowId.trim();
+
+  if (
+    normalized === "GITHUB_START_WORKFLOW" ||
+    normalized === "wf-webhook-github-default"
+  ) {
+    return "GITHUB_START_WORKFLOW";
+  }
+
+  if (
+    normalized === "JIRA_START_WORKFLOW" ||
+    normalized === "wf-webhook-jira-default"
+  ) {
+    return "JIRA_START_WORKFLOW";
+  }
+
+  if (
+    normalized === "SLACK_START_WORKFLOW" ||
+    normalized === "wf-webhook-slack-default"
+  ) {
+    return "SLACK_START_WORKFLOW";
+  }
+
+  return null;
+}
+
+function fallbackRetryEventName(workflow: RoutedWorkflow): string {
+  if (workflow === "JIRA_START_WORKFLOW") {
+    return "jira.retry";
+  }
+
+  if (workflow === "SLACK_START_WORKFLOW") {
+    return "slack.retry";
+  }
+
+  return "github.retry";
+}
+
 function buildRetryWebhookEventFromStepRuns(
   stepRuns: StepRunRecord[],
+  routedWorkflow?: RoutedWorkflow,
 ): NormalizedWebhookEvent {
   const ordered = [...stepRuns].sort(
     (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
@@ -637,6 +680,27 @@ function buildRetryWebhookEventFromStepRuns(
     const pusherCandidates = [input.pusher, row.pusher];
     const beforeCandidates = [input.before, row.before];
     const afterCandidates = [input.after, row.after];
+    const issueIdCandidates = [input.issue_id, input.issueId, row.issue_id];
+    const issueKeyCandidates = [input.issue_key, input.issueKey, row.issue_key];
+    const issueTitleCandidates = [
+      input.issue_title,
+      input.issueTitle,
+      row.issue_title,
+    ];
+    const issueStatusCandidates = [
+      input.issue_status,
+      input.issueStatus,
+      row.issue_status,
+    ];
+    const projectKeyCandidates = [
+      input.project_key,
+      input.projectKey,
+      row.project_key,
+    ];
+    const userCandidates = [input.user, row.user];
+    const channelCandidates = [input.channel, row.channel];
+    const textCandidates = [input.text, row.text];
+    const tsCandidates = [input.ts, row.ts];
 
     if (!data.repository) {
       for (const candidate of repositoryCandidates) {
@@ -697,9 +761,101 @@ function buildRetryWebhookEventFromStepRuns(
         }
       }
     }
+
+    if (!data.issue_id) {
+      for (const candidate of issueIdCandidates) {
+        const value = asString(candidate);
+        if (value) {
+          data.issue_id = value;
+          break;
+        }
+      }
+    }
+
+    if (!data.issue_key) {
+      for (const candidate of issueKeyCandidates) {
+        const value = asString(candidate);
+        if (value) {
+          data.issue_key = value;
+          break;
+        }
+      }
+    }
+
+    if (!data.issue_title) {
+      for (const candidate of issueTitleCandidates) {
+        const value = asString(candidate);
+        if (value) {
+          data.issue_title = value;
+          break;
+        }
+      }
+    }
+
+    if (!data.issue_status) {
+      for (const candidate of issueStatusCandidates) {
+        const value = asString(candidate);
+        if (value) {
+          data.issue_status = value;
+          break;
+        }
+      }
+    }
+
+    if (!data.project_key) {
+      for (const candidate of projectKeyCandidates) {
+        const value = asString(candidate);
+        if (value) {
+          data.project_key = value;
+          break;
+        }
+      }
+    }
+
+    if (!data.user) {
+      for (const candidate of userCandidates) {
+        const value = asString(candidate);
+        if (value) {
+          data.user = value;
+          break;
+        }
+      }
+    }
+
+    if (!data.channel) {
+      for (const candidate of channelCandidates) {
+        const value = asString(candidate);
+        if (value) {
+          data.channel = value;
+          break;
+        }
+      }
+    }
+
+    if (!data.text) {
+      for (const candidate of textCandidates) {
+        const value = asString(candidate);
+        if (value) {
+          data.text = value;
+          break;
+        }
+      }
+    }
+
+    if (!data.ts) {
+      for (const candidate of tsCandidates) {
+        const value = asString(candidate);
+        if (value) {
+          data.ts = value;
+          break;
+        }
+      }
+    }
   }
 
-  const fallbackEvent = eventName || "github.retry";
+  const fallbackEvent =
+    eventName ||
+    fallbackRetryEventName(routedWorkflow || "GITHUB_START_WORKFLOW");
   if (!data.repository) {
     data.repository = "unknown-repo";
   }
@@ -1477,17 +1633,13 @@ router.post(
       });
     }
 
-    const routedWorkflow =
-      workflowId === "GITHUB_START_WORKFLOW" ||
-      workflowId === "wf-webhook-github-default"
-        ? "GITHUB_START_WORKFLOW"
-        : null;
+    const routedWorkflow = resolveRetryRoutedWorkflow(workflowId);
 
     if (!routedWorkflow) {
       return res.status(400).json({
         success: false,
         error:
-          "Retry with missing details is currently available for the GitHub default webhook workflow only.",
+          "Retry with missing details is available only for default webhook workflows (GitHub, Jira, Slack).",
       });
     }
 
@@ -1497,19 +1649,41 @@ router.post(
         return status === "failed" || status === "error";
       })?.toolName || "";
 
-    await Promise.all(
-      Object.entries(missingDetails).map(([detailKey, detailValue]) =>
-        upsertMissingDetailMemory({
-          ownerUserId: userId,
-          detailKey,
-          detailValue,
-          scope: "missing-details",
-          toolName: failedToolName || undefined,
-        }),
-      ),
+    const memoryUpserts = Object.entries(missingDetails).flatMap(
+      ([detailKey, detailValue]) => {
+        const writes = [
+          upsertMissingDetailMemory({
+            ownerUserId: userId,
+            detailKey,
+            detailValue,
+            scope: "missing-details",
+            toolName: failedToolName || undefined,
+          }),
+        ];
+
+        // Webhook executions run without request user context, so mirror values
+        // into anonymous scope for backend auto-fill on future runs.
+        if (userId && userId.trim().length > 0) {
+          writes.push(
+            upsertMissingDetailMemory({
+              detailKey,
+              detailValue,
+              scope: "missing-details",
+              toolName: failedToolName || undefined,
+            }),
+          );
+        }
+
+        return writes;
+      },
     );
 
-    const retryEvent = buildRetryWebhookEventFromStepRuns(stepRunResult.rows);
+    await Promise.all(memoryUpserts);
+
+    const retryEvent = buildRetryWebhookEventFromStepRuns(
+      stepRunResult.rows,
+      routedWorkflow,
+    );
     const retriedExecution = await executeWebhookWorkflow({
       workflow: routedWorkflow,
       event: retryEvent,

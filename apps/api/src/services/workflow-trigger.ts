@@ -3,6 +3,7 @@ import type {
   RoutedWorkflow,
   WorkflowTriggerResult,
 } from "../types/webhook.js";
+import { processMCPRequest } from "./mcp.js";
 import { executeWebhookWorkflow } from "./webhook-workflow-executor.js";
 import { shouldSuppressWebhookEvent } from "./webhook-loop-guard.js";
 
@@ -22,6 +23,27 @@ const ALWAYS_ON_PREDEFINED_WORKFLOWS =
 const WEBHOOK_USE_AGENTIC_PLANNER =
   (process.env.WEBHOOK_USE_AGENTIC_PLANNER ?? "false").trim().toLowerCase() ===
   "true";
+
+const SLACK_WORKFLOW_ALLOWED_CHANNELS = (
+  process.env.SLACK_WORKFLOW_ALLOWED_CHANNELS ?? "#bug-reporting"
+)
+  .split(",")
+  .map((channel) => normalizeSlackChannel(channel))
+  .filter(Boolean);
+
+const JIRA_MERGED_BRANCH_DONE_STATUS = (
+  process.env.JIRA_MERGED_BRANCH_DONE_STATUS ?? "Done"
+).trim();
+
+const JIRA_MERGE_DONE_BRANCHES = (
+  process.env.JIRA_MERGE_DONE_BRANCHES ?? "main,master"
+)
+  .split(",")
+  .map((branch) => normalizeGitBranch(branch))
+  .filter(Boolean);
+
+const SLACK_ALLOWED_CHANNEL_SET = new Set(SLACK_WORKFLOW_ALLOWED_CHANNELS);
+const JIRA_MERGE_DONE_BRANCH_SET = new Set(JIRA_MERGE_DONE_BRANCHES);
 
 const ALWAYS_ON_WORKFLOWS: RoutedWorkflow[] = [
   "GITHUB_START_WORKFLOW",
@@ -65,6 +87,222 @@ function asObject(value: unknown): Record<string, unknown> {
   }
 
   return value as Record<string, unknown>;
+}
+
+function asString(value: unknown): string {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  return "";
+}
+
+function asBoolean(value: unknown): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return (
+      normalized === "true" ||
+      normalized === "1" ||
+      normalized === "yes" ||
+      normalized === "y"
+    );
+  }
+
+  return false;
+}
+
+function normalizeGitBranch(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^refs\/heads\//, "");
+}
+
+const ISSUE_KEY_REGEX = /\b([a-z][a-z0-9]+-\d+)\b/i;
+
+function extractIssueKeyFromText(value: string): string {
+  const normalized = value.trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const match = normalized.match(ISSUE_KEY_REGEX);
+  return match?.[1] ? match[1].toUpperCase() : "";
+}
+
+function resolveIssueKeyFromGitHubEvent(event: NormalizedWebhookEvent): string {
+  const payload = asObject(event.data);
+  const candidates = [
+    asString(payload.issue_key),
+    asString(payload.head_ref),
+    asString(payload.ref),
+    asString(payload.pull_request_title),
+    asString(payload.head_commit_message),
+  ];
+
+  for (const candidate of candidates) {
+    const key = extractIssueKeyFromText(candidate);
+    if (key) {
+      return key;
+    }
+  }
+
+  return "";
+}
+
+function isGitHubMergeToTrackedBranch(event: NormalizedWebhookEvent): {
+  matches: boolean;
+  baseBranch: string;
+} {
+  if (event.source !== "github") {
+    return { matches: false, baseBranch: "" };
+  }
+
+  const normalizedEvent = event.event.trim().toLowerCase();
+  if (
+    normalizedEvent !== "github.pull_request" &&
+    !normalizedEvent.startsWith("github.pull_request.")
+  ) {
+    return { matches: false, baseBranch: "" };
+  }
+
+  const payload = asObject(event.data);
+  const merged =
+    asBoolean(payload.merged_to_default) ||
+    asBoolean(payload.pull_request_merged);
+  if (!merged) {
+    return { matches: false, baseBranch: "" };
+  }
+
+  const baseBranch = normalizeGitBranch(
+    asString(payload.base_ref) ||
+      asString(payload.default_branch) ||
+      asString(payload.ref),
+  );
+  if (!baseBranch) {
+    return { matches: false, baseBranch: "" };
+  }
+
+  if (JIRA_MERGE_DONE_BRANCH_SET.size === 0) {
+    return { matches: true, baseBranch };
+  }
+
+  return {
+    matches: JIRA_MERGE_DONE_BRANCH_SET.has(baseBranch),
+    baseBranch,
+  };
+}
+
+async function maybeTransitionMergedIssueToDone(
+  event: NormalizedWebhookEvent,
+): Promise<void> {
+  if (!JIRA_MERGED_BRANCH_DONE_STATUS) {
+    return;
+  }
+
+  const mergeCheck = isGitHubMergeToTrackedBranch(event);
+  if (!mergeCheck.matches) {
+    return;
+  }
+
+  const issueKey = resolveIssueKeyFromGitHubEvent(event);
+  if (!issueKey) {
+    console.info(
+      `[WebhookTrigger] github merge detected but no Jira issue key resolved event=${event.event}`,
+    );
+    return;
+  }
+
+  const response = await processMCPRequest({
+    jsonrpc: "2.0",
+    id: `jira-merge-done-${issueKey}-${Date.now()}`,
+    method: "jira.update_issue",
+    params: {
+      issue_key: issueKey,
+      status: JIRA_MERGED_BRANCH_DONE_STATUS,
+      comment: `Auto-transitioned by NexusMCP after merge to ${mergeCheck.baseBranch}.`,
+    },
+  });
+
+  if (response.error) {
+    console.warn(
+      `[WebhookTrigger] jira done transition failed for ${issueKey}: ${response.error.message}`,
+    );
+    return;
+  }
+
+  console.info(
+    `[WebhookTrigger] jira issue ${issueKey} moved to ${JIRA_MERGED_BRANCH_DONE_STATUS} after merge to ${mergeCheck.baseBranch}`,
+  );
+}
+
+function normalizeSlackChannel(value: string): string {
+  return value.trim().toLowerCase().replace(/^#/, "");
+}
+
+function shouldRunSlackWorkflow(event: NormalizedWebhookEvent): {
+  allowed: boolean;
+  reason?: string;
+} {
+  const normalizedEvent = event.event.trim().toLowerCase();
+  const isMessageEvent =
+    normalizedEvent === "slack.message" ||
+    normalizedEvent.startsWith("slack.message.");
+
+  if (!isMessageEvent) {
+    return {
+      allowed: false,
+      reason: `Ignored Slack event ${event.event}; only message events can trigger workflow.`,
+    };
+  }
+
+  // If allowlist is intentionally emptied, allow message events from any channel.
+  if (SLACK_ALLOWED_CHANNEL_SET.size === 0) {
+    return { allowed: true };
+  }
+
+  const payload = asObject(event.data);
+  const candidates = [
+    asString(payload.channel_name),
+    asString(payload.channel),
+    asString(payload.channel_id),
+    asString(payload.channelId),
+  ]
+    .map((value) => normalizeSlackChannel(value))
+    .filter(Boolean);
+
+  if (candidates.length === 0) {
+    return {
+      allowed: false,
+      reason:
+        "Ignored Slack message event because channel information is missing.",
+    };
+  }
+
+  const hasAllowedChannel = candidates.some((channel) =>
+    SLACK_ALLOWED_CHANNEL_SET.has(channel),
+  );
+
+  if (hasAllowedChannel) {
+    return { allowed: true };
+  }
+
+  return {
+    allowed: false,
+    reason: `Ignored Slack message from channel(s) ${candidates.join(", ")}; allowed channel(s): ${[...SLACK_ALLOWED_CHANNEL_SET].join(", ")}.`,
+  };
 }
 
 async function fetchPlannerDag(
@@ -299,6 +537,33 @@ export async function triggerWorkflow(
     };
   }
 
+  if (workflow === "GITHUB_START_WORKFLOW") {
+    try {
+      await maybeTransitionMergedIssueToDone(event);
+    } catch (error) {
+      console.warn(
+        `[WebhookTrigger] merge-to-done automation failed: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`,
+      );
+    }
+  }
+
+  if (workflow === "SLACK_START_WORKFLOW") {
+    const slackGate = shouldRunSlackWorkflow(event);
+    if (!slackGate.allowed) {
+      console.info(
+        `[WebhookTrigger] slack event ignored event=${event.event} reason=${slackGate.reason ?? "channel filter"}`,
+      );
+
+      return {
+        accepted: false,
+        workflow,
+        reason: slackGate.reason || "Slack event did not pass channel filter",
+      };
+    }
+  }
+
   console.info(
     `[WebhookTrigger] execution start workflow=${workflow} source=${event.source} event=${event.event}`,
   );
@@ -313,10 +578,23 @@ export async function triggerWorkflow(
     try {
       const execution = await executeWebhookWorkflow({ workflow, event });
 
+      if (!execution) {
+        console.warn(
+          `[WebhookTrigger] no executor implementation for workflow=${workflow}`,
+        );
+
+        return {
+          accepted: false,
+          workflow,
+          dag: predefinedDag,
+          reason: `No execution handler registered for ${workflow}`,
+        };
+      }
+
       return {
         accepted: true,
         workflow,
-        dag: execution ? { ...predefinedDag, execution } : predefinedDag,
+        dag: { ...predefinedDag, execution },
       };
     } catch (error) {
       console.error(
@@ -326,7 +604,7 @@ export async function triggerWorkflow(
       );
 
       return {
-        accepted: true,
+        accepted: false,
         workflow,
         dag: predefinedDag,
         reason: `Default workflow execution failed: ${
