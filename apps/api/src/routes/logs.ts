@@ -6,6 +6,7 @@ import {
   getStepRuns,
   initPostgresStore,
   isPostgresReady,
+  saveEventLog,
   type StepRunRecord,
 } from "../services/postgres-store.js";
 
@@ -48,6 +49,34 @@ async function ensurePostgresReady(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+let hasBackfilledAuditLogs = false;
+
+async function backfillAuditLogsFromMemoryIfNeeded(): Promise<void> {
+  if (hasBackfilledAuditLogs) {
+    return;
+  }
+
+  const memoryLogs = dataStore.getLogs({ limit: 1000, offset: 0 }).logs;
+  if (memoryLogs.length === 0) {
+    // Keep backfill enabled for future requests because logs may appear later.
+    return;
+  }
+
+  for (const log of memoryLogs) {
+    try {
+      await saveEventLog(log);
+    } catch (error) {
+      console.warn(
+        `Audit log backfill entry failed (${log.id}): ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`,
+      );
+    }
+  }
+
+  hasBackfilledAuditLogs = true;
 }
 
 function mapLogsToStepRunsFallback(limit: number, offset: number) {
@@ -113,6 +142,11 @@ router.get("/", async (req, res) => {
 
   try {
     result = await getEventLogs(filters);
+
+    if (result.total === 0) {
+      await backfillAuditLogsFromMemoryIfNeeded();
+      result = await getEventLogs(filters);
+    }
   } catch (error) {
     return res.status(500).json({
       success: false,
@@ -234,6 +268,7 @@ router.get("/stats", async (_req, res) => {
   }
 
   try {
+    await backfillAuditLogsFromMemoryIfNeeded();
     const stats = await getEventLogStats();
     return res.json({
       success: true,

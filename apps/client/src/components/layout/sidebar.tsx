@@ -65,23 +65,50 @@ export function Sidebar() {
     let isMounted = true;
 
     const loadAuditStats = async () => {
-      const response = await logsApi.getStats();
-      if (!isMounted || !response.success || !response.data) {
+      const statsResponse = await logsApi.getStats();
+      if (isMounted && statsResponse.success && statsResponse.data) {
+        setAuditTotalCount(statsResponse.data.total ?? 0);
+        setAuditErrorCount(statsResponse.data.byLevel.error ?? 0);
         return;
       }
 
-      setAuditTotalCount(response.data.total ?? 0);
-      setAuditErrorCount(response.data.byLevel.error ?? 0);
+      // Fallback path: keep count visible even if stats endpoint is temporarily unavailable.
+      const logsResponse = await logsApi.list({ limit: 1, offset: 0 });
+      if (!isMounted || !logsResponse.success) {
+        return;
+      }
+
+      const pagedResponse = logsResponse as unknown as {
+        pagination?: { total?: number };
+      };
+      const totalFromPagination = pagedResponse.pagination?.total;
+      const totalFromData = Array.isArray(logsResponse.data)
+        ? logsResponse.data.length
+        : 0;
+
+      setAuditTotalCount(totalFromPagination ?? totalFromData);
+      setAuditErrorCount(0);
     };
 
     void loadAuditStats();
 
+    const handleWindowFocus = () => {
+      if (document.visibilityState === "visible") {
+        void loadAuditStats();
+      }
+    };
+
+    window.addEventListener("focus", handleWindowFocus);
+    document.addEventListener("visibilitychange", handleWindowFocus);
+
     const intervalId = window.setInterval(() => {
       void loadAuditStats();
-    }, 15000);
+    }, 5000);
 
     return () => {
       isMounted = false;
+      window.removeEventListener("focus", handleWindowFocus);
+      document.removeEventListener("visibilitychange", handleWindowFocus);
       window.clearInterval(intervalId);
     };
   }, []);
@@ -130,7 +157,7 @@ export function Sidebar() {
                   )}
                   title={`PostgreSQL logs: ${auditTotalCount} total, ${auditErrorCount} errors`}
                 >
-                  {auditTotalCount > 99 ? "21" : auditTotalCount}
+                  {auditTotalCount > 99 ? "99+" : auditTotalCount}
                 </span>
               ) : null}
             </Link>

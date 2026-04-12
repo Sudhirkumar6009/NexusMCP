@@ -31,7 +31,7 @@ import {
   Database,
   BarChart3,
 } from "lucide-react";
-import { logsApi } from "@/lib/api";
+import { logsApi, workflowsApi } from "@/lib/api";
 
 type ApiLogRow = {
   id: string;
@@ -54,19 +54,81 @@ type LogStatsData = {
   last24Hours: number;
 };
 
-function mapLogRow(row: ApiLogRow): AuditLogEntry {
+type WorkflowSnapshot = {
+  id: string;
+  name: string;
+  description: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  nodes: unknown[];
+  edges: unknown[];
+  ownerUserId?: string;
+  generatedJson?: Record<string, unknown>;
+};
+
+function getWorkflowSnapshotFromDetails(
+  details: Record<string, unknown>,
+): WorkflowSnapshot | undefined {
+  const candidateKeys = [
+    "workflowJson",
+    "workflow",
+    "workflowSnapshot",
+    "workflow_definition",
+  ];
+
+  for (const key of candidateKeys) {
+    const value = details[key];
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      continue;
+    }
+
+    const raw = value as Record<string, unknown>;
+    return {
+      id: String(raw.id || ""),
+      name: String(raw.name || "Unknown Workflow"),
+      description: String(raw.description || ""),
+      status: String(raw.status || "unknown"),
+      createdAt: String(raw.createdAt || ""),
+      updatedAt: String(raw.updatedAt || ""),
+      nodes: Array.isArray(raw.nodes) ? raw.nodes : [],
+      edges: Array.isArray(raw.edges) ? raw.edges : [],
+      ownerUserId:
+        typeof raw.ownerUserId === "string" ? raw.ownerUserId : undefined,
+      generatedJson:
+        raw.generatedJson && typeof raw.generatedJson === "object"
+          ? (raw.generatedJson as Record<string, unknown>)
+          : undefined,
+    };
+  }
+
+  return undefined;
+}
+
+function mapLogRow(
+  row: ApiLogRow,
+  workflowsById: Map<string, WorkflowSnapshot>,
+): AuditLogEntry {
   const details = row.details || {};
   const level = row.level;
   const status: LogStatus = level === "error" ? "failed" : "success";
+  const workflowIdFromDetails =
+    typeof details.workflowId === "string" ? details.workflowId : undefined;
+  const workflowId = row.workflowId || workflowIdFromDetails || "N/A";
+  const workflowFromIndex =
+    workflowId !== "N/A" ? workflowsById.get(workflowId) : undefined;
+  const workflowFromDetails = getWorkflowSnapshotFromDetails(details);
+  const workflowJson = workflowFromIndex || workflowFromDetails;
 
   return {
     id: row.id,
     timestamp: new Date(row.timestamp),
     level,
-    workflowId: row.workflowId || "N/A",
+    workflowId,
     workflowName:
+      workflowFromIndex?.name ||
       (typeof details.workflowName === "string" && details.workflowName) ||
-      row.workflowId ||
+      workflowId ||
       "System Event",
     executionId:
       row.executionId ||
@@ -91,7 +153,10 @@ function mapLogRow(row: ApiLogRow): AuditLogEntry {
       "System",
     userRole:
       (typeof details.userRole === "string" && details.userRole) || "system",
-    metadata: details,
+    metadata: {
+      ...details,
+      ...(workflowJson ? { workflowJson } : {}),
+    },
   };
 }
 
@@ -124,13 +189,51 @@ export default function LogsPage() {
     setIsRefreshing(true);
     try {
       const [logsResponse, statsResponse] = await Promise.all([
-        logsApi.list({ limit: 500, offset: 0 }),
+        logsApi.listAll(),
         logsApi.getStats(),
       ]);
 
+      const workflowsResponse = await workflowsApi.list({
+        scope: "all",
+        limit: 1000,
+        offset: 0,
+      });
+
+      const workflowMap = new Map<string, WorkflowSnapshot>();
+      if (workflowsResponse.success && Array.isArray(workflowsResponse.data)) {
+        for (const workflow of workflowsResponse.data as unknown as Array<
+          Record<string, unknown>
+        >) {
+          const workflowId = String(workflow.id || "");
+          if (!workflowId) {
+            continue;
+          }
+
+          workflowMap.set(workflowId, {
+            id: workflowId,
+            name: String(workflow.name || "Unknown Workflow"),
+            description: String(workflow.description || ""),
+            status: String(workflow.status || "unknown"),
+            createdAt: String(workflow.createdAt || ""),
+            updatedAt: String(workflow.updatedAt || ""),
+            nodes: Array.isArray(workflow.nodes) ? workflow.nodes : [],
+            edges: Array.isArray(workflow.edges) ? workflow.edges : [],
+            ownerUserId:
+              typeof workflow.ownerUserId === "string"
+                ? workflow.ownerUserId
+                : undefined,
+            generatedJson:
+              workflow.generatedJson &&
+              typeof workflow.generatedJson === "object"
+                ? (workflow.generatedJson as Record<string, unknown>)
+                : undefined,
+          });
+        }
+      }
+
       if (logsResponse.success && Array.isArray(logsResponse.data)) {
         const mappedLogs = (logsResponse.data as unknown as ApiLogRow[]).map(
-          mapLogRow,
+          (row) => mapLogRow(row, workflowMap),
         );
         setLogs(mappedLogs);
         setLoadError(null);
@@ -548,6 +651,24 @@ export default function LogsPage() {
               </pre>
             </div>
           )}
+
+          <div className="mt-4">
+            <p className="text-sm font-medium text-content-primary mb-2">
+              Workflow JSON
+            </p>
+            <pre className="p-3 bg-surface-tertiary rounded text-xs font-mono overflow-x-auto">
+              {JSON.stringify(
+                (selectedLog.metadata as Record<string, unknown> | undefined)
+                  ?.workflowJson ||
+                  {
+                    message:
+                      "Workflow JSON not available for this log entry.",
+                  },
+                null,
+                2,
+              )}
+            </pre>
+          </div>
 
           {selectedLog.approvalInfo && (
             <div className="mt-4 p-3 bg-primary-light rounded">
