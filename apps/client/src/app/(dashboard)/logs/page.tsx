@@ -238,7 +238,6 @@ export default function LogsPage() {
         setLogs(mappedLogs);
         setLoadError(null);
       } else {
-        setLogs([]);
         setLoadError(
           logsResponse.error ||
             "Unable to load PostgreSQL event_logs for Audit Logs.",
@@ -247,7 +246,7 @@ export default function LogsPage() {
 
       if (statsResponse.success && statsResponse.data) {
         setStats(statsResponse.data as unknown as LogStatsData);
-      } else if (!loadError) {
+      } else if (!logsResponse.success && !loadError) {
         setLoadError(
           statsResponse.error ||
             "Unable to load PostgreSQL event_logs statistics.",
@@ -283,7 +282,18 @@ export default function LogsPage() {
 
       return matchesSearch && matchesStatus && matchesService;
     });
+  }, [logs, searchQuery, statusFilter, serviceFilter]);
+
+  useEffect(() => {
+    setCurrentPage(1);
   }, [searchQuery, statusFilter, serviceFilter]);
+
+  useEffect(() => {
+    const nextTotalPages = Math.max(1, Math.ceil(filteredLogs.length / pageSize));
+    if (currentPage > nextTotalPages) {
+      setCurrentPage(nextTotalPages);
+    }
+  }, [filteredLogs.length, currentPage]);
 
   // Paginate
   const totalPages = Math.ceil(filteredLogs.length / pageSize);
