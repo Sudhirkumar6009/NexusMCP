@@ -299,11 +299,14 @@ function normalizeGitHubWebhook(
         asString(pullRequest.number) || asString(dataPullRequest.number),
       pull_request_title:
         asString(pullRequest.title) || asString(dataPullRequest.title),
+      pull_request_body:
+        asString(pullRequest.body) || asString(dataPullRequest.body),
       pull_request_merged: pullRequestMerged,
       base_ref: baseRef,
       head_ref: headRef,
       default_branch: defaultBranch,
       merged_to_default: mergedToDefault,
+      commit_messages: commitMessages.slice(0, 100),
     },
   };
 }

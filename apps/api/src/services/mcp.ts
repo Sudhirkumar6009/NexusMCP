@@ -2174,6 +2174,66 @@ function normalizeTransitionName(name: string): string {
   return name.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+function getJiraStatusAliases(statusName: string): string[] {
+  const normalized = normalizeTransitionName(statusName);
+
+  if (!normalized) {
+    return [];
+  }
+
+  const aliases = new Set<string>([normalized]);
+
+  if (
+    normalized === "done" ||
+    normalized === "complete" ||
+    normalized === "completed" ||
+    normalized === "resolved" ||
+    normalized === "closed" ||
+    normalized === "fixed"
+  ) {
+    aliases.add("done");
+    aliases.add("complete");
+    aliases.add("completed");
+    aliases.add("resolved");
+    aliases.add("closed");
+    aliases.add("fixed");
+  }
+
+  if (
+    normalized === "in progress" ||
+    normalized === "progress" ||
+    normalized === "doing" ||
+    normalized === "in development"
+  ) {
+    aliases.add("in progress");
+    aliases.add("progress");
+    aliases.add("doing");
+    aliases.add("in development");
+  }
+
+  return [...aliases];
+}
+
+function statusesEquivalent(
+  currentStatus: string,
+  requestedStatus: string,
+): boolean {
+  const currentAliases = new Set(getJiraStatusAliases(currentStatus));
+  const requestedAliases = new Set(getJiraStatusAliases(requestedStatus));
+
+  if (currentAliases.size === 0 || requestedAliases.size === 0) {
+    return false;
+  }
+
+  for (const alias of currentAliases) {
+    if (requestedAliases.has(alias)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 async function resolveJiraTransitionId(
   config: JiraConfig,
   issueKey: string,
@@ -2187,16 +2247,19 @@ async function resolveJiraTransitionId(
 
   const transitions = parseBodyAsList(transitionsPayload.transitions);
   const targetName = normalizeTransitionName(transitionName);
+  const targetAliases = new Set(getJiraStatusAliases(transitionName));
 
   const matched = transitions.find((entry) => {
     const transition = parseBodyAsRecord(entry);
     const name = pickString(transition, ["name"]);
     const to = parseBodyAsRecord(transition.to);
     const toName = pickString(to, ["name"]);
+    const normalizedName = name ? normalizeTransitionName(name) : "";
+    const normalizedToName = toName ? normalizeTransitionName(toName) : "";
 
     return Boolean(
-      (name && normalizeTransitionName(name) === targetName) ||
-      (toName && normalizeTransitionName(toName) === targetName),
+      (normalizedName && targetAliases.has(normalizedName)) ||
+      (normalizedToName && targetAliases.has(normalizedToName)),
     );
   });
 
@@ -2205,6 +2268,29 @@ async function resolveJiraTransitionId(
     const transitionId = pickString(transitionRecord, ["id"]);
     if (transitionId) {
       return transitionId;
+    }
+  }
+
+  if (targetAliases.has("done") || targetName === "done") {
+    const doneCategoryTransition = transitions.find((entry) => {
+      const transition = parseBodyAsRecord(entry);
+      const to = parseBodyAsRecord(transition.to);
+      const category = parseBodyAsRecord(to.statusCategory);
+      const categoryKey = normalizeTransitionName(
+        pickString(category, ["key"]) || "",
+      );
+
+      return categoryKey === "done";
+    });
+
+    if (doneCategoryTransition) {
+      const transitionId = pickString(
+        parseBodyAsRecord(doneCategoryTransition),
+        ["id"],
+      );
+      if (transitionId) {
+        return transitionId;
+      }
     }
   }
 
@@ -2622,11 +2708,55 @@ const handlers: Record<string, MCPHandler> = {
       );
     }
 
-    const transitionId =
-      requestedTransitionId ||
-      (requestedStatus
-        ? await resolveJiraTransitionId(config, issueKey, requestedStatus)
-        : undefined);
+    let transitionId = requestedTransitionId;
+    if (!transitionId && requestedStatus) {
+      try {
+        transitionId = await resolveJiraTransitionId(
+          config,
+          issueKey,
+          requestedStatus,
+        );
+      } catch (transitionResolutionError) {
+        const issue = await jiraRequest(
+          config,
+          "GET",
+          `/rest/api/3/issue/${encodeURIComponent(issueKey)}`,
+        );
+        const fieldsPayload = parseBodyAsRecord(issue.fields);
+        const currentStatus = pickString(
+          parseBodyAsRecord(fieldsPayload.status),
+          ["name"],
+        );
+
+        if (
+          currentStatus &&
+          requestedStatus &&
+          statusesEquivalent(currentStatus, requestedStatus)
+        ) {
+          dataStore.addLog({
+            level: "info",
+            service: "jira",
+            action: "update_issue",
+            message: `Issue ${issueKey} is already in requested status ${requestedStatus}`,
+            details: {
+              issueKey,
+              mode: "transition_noop",
+              status: requestedStatus,
+              currentStatus,
+            },
+          });
+
+          return {
+            success: true,
+            issueKey,
+            mode: "transition_noop",
+            status: currentStatus,
+          };
+        }
+
+        throw transitionResolutionError;
+      }
+    }
 
     if (!transitionId) {
       throw new Error(

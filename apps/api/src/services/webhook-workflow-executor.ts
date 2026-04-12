@@ -63,6 +63,7 @@ type GithubExecutionContext = {
   deliveryId: string;
   repository: string;
   ref: string;
+  headRef: string;
   baseRef: string;
   defaultBranch: string;
   sender: string;
@@ -72,6 +73,7 @@ type GithubExecutionContext = {
   pullRequestMerged: boolean;
   mergedToDefault: boolean;
   commitCount: string;
+  commitMessages: string[];
   changedFiles: string;
   compareUrl: string;
   headCommitMessage: string;
@@ -204,28 +206,98 @@ function normalizeGitBranchName(value: string): string {
     .replace(/^refs\/heads\//, "");
 }
 
-function shouldMarkDoneForGitHubEvent(
-  context: GithubExecutionContext,
-): boolean {
-  if (!context.pullRequestMerged) {
-    return false;
-  }
-
-  if (context.mergedToDefault) {
-    return true;
-  }
-
-  const normalizedBase = normalizeGitBranchName(context.baseRef || context.ref);
-  const normalizedDefault = normalizeGitBranchName(context.defaultBranch);
-
-  if (!normalizedBase) {
+function isMergeCommitLike(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) {
     return false;
   }
 
   return (
-    normalizedBase === normalizedDefault ||
-    normalizedBase === "main" ||
-    normalizedBase === "master"
+    normalized.includes("merge pull request") ||
+    normalized.startsWith("merge branch") ||
+    normalized.startsWith("merged in")
+  );
+}
+
+function extractMergedSourceBranchFromMessage(message: string): string {
+  const normalized = message.trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const githubStyleMatch = normalized.match(
+    /\bfrom\s+[a-z0-9_.-]+\/([a-z0-9._\/-]+)/i,
+  );
+  if (githubStyleMatch?.[1]) {
+    return normalizeGitBranchName(githubStyleMatch[1]);
+  }
+
+  const mergeBranchMatch = normalized.match(
+    /merge\s+branch\s+['"]?([^'"\s]+)['"]?/i,
+  );
+  if (mergeBranchMatch?.[1]) {
+    return normalizeGitBranchName(mergeBranchMatch[1]);
+  }
+
+  return "";
+}
+
+function isPushToDefaultBranch(context: GithubExecutionContext): boolean {
+  const normalizedEvent = context.event.trim().toLowerCase();
+  if (normalizedEvent !== "github.push") {
+    return false;
+  }
+
+  const normalizedRef = normalizeGitBranchName(context.ref);
+  const normalizedDefault = normalizeGitBranchName(context.defaultBranch);
+
+  if (!normalizedRef || !normalizedDefault) {
+    return false;
+  }
+
+  return normalizedRef === normalizedDefault;
+}
+
+function shouldMarkDoneForGitHubEvent(
+  context: GithubExecutionContext,
+): boolean {
+  if (context.mergedToDefault) {
+    return true;
+  }
+
+  if (context.pullRequestMerged) {
+    const normalizedBase = normalizeGitBranchName(
+      context.baseRef || context.ref,
+    );
+    const normalizedDefault = normalizeGitBranchName(context.defaultBranch);
+
+    if (!normalizedBase) {
+      return false;
+    }
+
+    return (
+      normalizedBase === normalizedDefault ||
+      normalizedBase === "main" ||
+      normalizedBase === "master"
+    );
+  }
+
+  if (!isPushToDefaultBranch(context)) {
+    return false;
+  }
+
+  if (isMergeCommitLike(context.headCommitMessage)) {
+    return true;
+  }
+
+  return context.commitMessages.some((message) => isMergeCommitLike(message));
+}
+
+function shouldSkipJiraSyncForGitHubEvent(
+  context: GithubExecutionContext,
+): boolean {
+  return (
+    isPushToDefaultBranch(context) && !shouldMarkDoneForGitHubEvent(context)
   );
 }
 
@@ -530,14 +602,21 @@ function buildGithubExecutionContext(
 ): GithubExecutionContext {
   const payload = asRecord(event.data);
   const ref = asString(payload.ref);
+  const headRef = asString(payload.head_ref);
   const baseRef = asString(payload.base_ref);
   const defaultBranch = asString(payload.default_branch) || "main";
+  const pullRequest = asRecord(payload.pull_request);
+  const commitMessages = asStringArray(payload.commit_messages).slice(0, 100);
   const issueKey = resolveFirstIssueKey([
     payload.issue_key,
     payload.head_ref,
     payload.ref,
     payload.pull_request_title,
+    payload.pull_request_body,
+    pullRequest.title,
+    pullRequest.body,
     payload.head_commit_message,
+    ...commitMessages,
   ]);
   const changedFiles = asStringArray(payload.changed_files)
     .slice(0, 30)
@@ -548,6 +627,7 @@ function buildGithubExecutionContext(
     deliveryId: asString(payload.delivery_id),
     repository: asString(payload.repository) || "unknown-repo",
     ref,
+    headRef,
     baseRef,
     defaultBranch,
     sender: asString(payload.sender) || "unknown-user",
@@ -557,6 +637,7 @@ function buildGithubExecutionContext(
     pullRequestMerged: asBoolean(payload.pull_request_merged),
     mergedToDefault: asBoolean(payload.merged_to_default),
     commitCount: asString(payload.commit_count),
+    commitMessages,
     changedFiles,
     compareUrl: asString(payload.compare_url),
     headCommitMessage: asString(payload.head_commit_message),
@@ -642,7 +723,10 @@ function buildGithubWorkflowDescription(
 ): string {
   const triggerLine = `Triggered by ${context.event}`;
   const repoLine = `Repository: ${context.repository}`;
-  const refLine = context.ref ? `Ref: ${context.ref}` : "Ref: n/a";
+  const refLine =
+    context.headRef || context.ref
+      ? `Ref: ${context.headRef || context.ref}`
+      : "Ref: n/a";
   const actorLine = `Actor: ${context.sender}`;
 
   return `${triggerLine} | ${repoLine} | ${refLine} | ${actorLine}`;
@@ -729,8 +813,11 @@ function buildGithubWorkflowGraph(context: GithubExecutionContext): {
   edges: Workflow["edges"];
 } {
   const hasExistingIssue = Boolean(context.issueKey);
+  const skipIssueUpdate =
+    hasExistingIssue && shouldSkipJiraSyncForGitHubEvent(context);
   const includeJiraStep =
-    hasExistingIssue || GITHUB_CREATE_JIRA_WHEN_NO_ISSUE_KEY;
+    (hasExistingIssue && !skipIssueUpdate) ||
+    GITHUB_CREATE_JIRA_WHEN_NO_ISSUE_KEY;
 
   const nodes: Workflow["nodes"] = [
     {
@@ -934,13 +1021,30 @@ function buildGithubStepPlan(
   ).trim();
 
   const hasExistingIssue = Boolean(context.issueKey);
+  const markDone = shouldMarkDoneForGitHubEvent(context);
+  const inferredMergeSourceBranch =
+    extractMergedSourceBranchFromMessage(context.headCommitMessage) ||
+    context.commitMessages
+      .map((message) => extractMergedSourceBranchFromMessage(message))
+      .find(Boolean) ||
+    "";
+  const sourceBranch =
+    normalizeGitBranchName(context.headRef) ||
+    inferredMergeSourceBranch ||
+    normalizeGitBranchName(context.ref) ||
+    "unknown-branch";
+  const targetBranch =
+    normalizeGitBranchName(context.baseRef || context.defaultBranch) || "main";
+  const skipIssueUpdate =
+    hasExistingIssue && shouldSkipJiraSyncForGitHubEvent(context);
+  const shouldUpdateExistingIssue = hasExistingIssue && !skipIssueUpdate;
   const shouldCreateNewIssue =
     !hasExistingIssue && GITHUB_CREATE_JIRA_WHEN_NO_ISSUE_KEY;
-  const jiraUpdateStatus = shouldMarkDoneForGitHubEvent(context)
+  const jiraUpdateStatus = markDone
     ? JIRA_MERGED_BRANCH_DONE_STATUS
     : JIRA_EXISTING_ISSUE_STATUS;
 
-  const jiraStep: WorkflowStepPlan | null = hasExistingIssue
+  const jiraStep: WorkflowStepPlan | null = shouldUpdateExistingIssue
     ? {
         id: "jira-update",
         nodeId: "step-jira",
@@ -950,9 +1054,9 @@ function buildGithubStepPlan(
         buildInput: () => ({
           issue_key: context.issueKey,
           status: jiraUpdateStatus,
-          comment: shouldMarkDoneForGitHubEvent(context)
-            ? `GitHub merge to mainline detected. Marking ${context.issueKey} as ${jiraUpdateStatus}.`
-            : `GitHub webhook event ${context.event} detected. Updating ${context.issueKey} to ${jiraUpdateStatus}.`,
+          comment: markDone
+            ? `GitHub merge detected: ${sourceBranch} -> ${targetBranch}. Marking ${context.issueKey} as ${jiraUpdateStatus}.`
+            : `GitHub webhook event ${context.event} detected on branch ${sourceBranch}. Updating ${context.issueKey} to ${jiraUpdateStatus}.`,
         }),
       }
     : shouldCreateNewIssue
@@ -997,10 +1101,14 @@ function buildGithubStepPlan(
       buildInput: (stepContext) => ({
         channel: slackChannel,
         text: stepContext.issueKey
-          ? `GitHub webhook processed for ${stepContext.repository}. Jira ticket ${stepContext.issueKey} synced.`
+          ? markDone
+            ? `GitHub merge processed for ${stepContext.repository}. Jira ticket ${stepContext.issueKey} moved to ${jiraUpdateStatus}. Bug fixed on branch ${sourceBranch} and merged into ${targetBranch}.`
+            : jiraStep
+              ? `GitHub webhook processed for ${stepContext.repository}. Jira ticket ${stepContext.issueKey} updated to ${jiraUpdateStatus} for branch ${sourceBranch}.`
+              : `GitHub webhook processed for ${stepContext.repository}. Jira ticket ${stepContext.issueKey} identified; no Jira status change for branch ${sourceBranch}.`
           : GITHUB_CREATE_JIRA_WHEN_NO_ISSUE_KEY
             ? `GitHub webhook processed for ${stepContext.repository}. Jira ticket creation attempted.`
-            : `GitHub webhook processed for ${stepContext.repository}. Jira ticket creation skipped (no Jira key found).`,
+            : `GitHub webhook processed for ${stepContext.repository}.`,
       }),
     },
     {
@@ -1017,6 +1125,8 @@ function buildGithubStepPlan(
             delivery_id: context.deliveryId,
             repository: context.repository,
             ref: context.ref,
+            head_ref: context.headRef,
+            base_ref: context.baseRef,
             sender: context.sender,
             pusher: context.pusher,
             issue_key: context.issueKey,

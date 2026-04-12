@@ -142,24 +142,35 @@ function extractIssueKeyFromText(value: string): string {
   return match?.[1] ? match[1].toUpperCase() : "";
 }
 
-function resolveIssueKeyFromGitHubEvent(event: NormalizedWebhookEvent): string {
-  const payload = asObject(event.data);
-  const candidates = [
-    asString(payload.issue_key),
-    asString(payload.head_ref),
-    asString(payload.ref),
-    asString(payload.pull_request_title),
-    asString(payload.head_commit_message),
-  ];
-
+function resolveIssueKeyFromCandidates(candidates: unknown[]): string {
   for (const candidate of candidates) {
-    const key = extractIssueKeyFromText(candidate);
+    const key = extractIssueKeyFromText(asString(candidate));
     if (key) {
       return key;
     }
   }
 
   return "";
+}
+
+function resolveIssueKeyFromGitHubEvent(event: NormalizedWebhookEvent): string {
+  const payload = asObject(event.data);
+  const pullRequest = asObject(payload.pull_request);
+  const commitMessages = Array.isArray(payload.commit_messages)
+    ? payload.commit_messages
+    : [];
+
+  return resolveIssueKeyFromCandidates([
+    payload.issue_key,
+    payload.head_ref,
+    payload.ref,
+    payload.pull_request_title,
+    payload.pull_request_body,
+    payload.head_commit_message,
+    pullRequest.title,
+    pullRequest.body,
+    ...commitMessages,
+  ]);
 }
 
 function isGitHubMergeToTrackedBranch(event: NormalizedWebhookEvent): {
@@ -179,19 +190,23 @@ function isGitHubMergeToTrackedBranch(event: NormalizedWebhookEvent): {
   }
 
   const payload = asObject(event.data);
-  const merged =
-    asBoolean(payload.merged_to_default) ||
-    asBoolean(payload.pull_request_merged);
-  if (!merged) {
-    return { matches: false, baseBranch: "" };
-  }
-
   const baseBranch = normalizeGitBranch(
     asString(payload.base_ref) ||
       asString(payload.default_branch) ||
       asString(payload.ref),
   );
   if (!baseBranch) {
+    return { matches: false, baseBranch: "" };
+  }
+
+  const isPullRequestEvent =
+    normalizedEvent === "github.pull_request" ||
+    normalizedEvent.startsWith("github.pull_request.");
+  const pullRequestMerged =
+    asBoolean(payload.merged_to_default) ||
+    asBoolean(payload.pull_request_merged);
+
+  if (!(isPullRequestEvent && pullRequestMerged)) {
     return { matches: false, baseBranch: "" };
   }
 
