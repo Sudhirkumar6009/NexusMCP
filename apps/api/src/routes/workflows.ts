@@ -28,6 +28,19 @@ type WorkflowNodeService = Workflow["nodes"][number]["service"];
 
 type WorkflowListScope = "all" | "default" | "user";
 
+type DefaultWorkflowTemplate = {
+  id: "GITHUB_START_WORKFLOW" | "JIRA_START_WORKFLOW" | "SLACK_START_WORKFLOW";
+  name: string;
+  description: string;
+  triggerService: "github" | "jira" | "slack";
+  triggerLabel: string;
+  steps: Array<{
+    service: WorkflowNodeService;
+    operation: string;
+    label: string;
+  }>;
+};
+
 const DEFAULT_WORKFLOW_IDS = new Set([
   "GITHUB_START_WORKFLOW",
   "JIRA_START_WORKFLOW",
@@ -49,6 +62,99 @@ const DEFAULT_ROUTED_WORKFLOWS = new Set([
   "SLACK_START_WORKFLOW",
 ]);
 
+const DEFAULT_WORKFLOW_TEMPLATES: DefaultWorkflowTemplate[] = [
+  {
+    id: "GITHUB_START_WORKFLOW",
+    name: "GitHub Default Workflow",
+    description:
+      "Waits for GitHub webhooks and executes Jira, Slack, Sheets, and Gmail actions.",
+    triggerService: "github",
+    triggerLabel: "GitHub Webhook Trigger",
+    steps: [
+      {
+        service: "jira",
+        operation: "create-issue",
+        label: "Create Jira Ticket",
+      },
+      {
+        service: "slack",
+        operation: "send-message",
+        label: "Post to Slack",
+      },
+      {
+        service: "google_sheets",
+        operation: "add-row",
+        label: "Update Spreadsheet",
+      },
+      {
+        service: "gmail",
+        operation: "send-email",
+        label: "Send Email",
+      },
+    ],
+  },
+  {
+    id: "JIRA_START_WORKFLOW",
+    name: "Jira Default Workflow",
+    description:
+      "Waits for Jira webhooks and executes GitHub, Slack, Sheets, and Gmail actions.",
+    triggerService: "jira",
+    triggerLabel: "Jira Webhook Trigger",
+    steps: [
+      {
+        service: "github",
+        operation: "create-branch",
+        label: "Create GitHub Branch",
+      },
+      {
+        service: "slack",
+        operation: "send-message",
+        label: "Post to Slack",
+      },
+      {
+        service: "google_sheets",
+        operation: "add-row",
+        label: "Update Spreadsheet",
+      },
+      {
+        service: "gmail",
+        operation: "send-email",
+        label: "Send Email",
+      },
+    ],
+  },
+  {
+    id: "SLACK_START_WORKFLOW",
+    name: "Slack Default Workflow",
+    description:
+      "Waits for Slack webhooks and executes Jira, GitHub, Sheets, and Gmail actions.",
+    triggerService: "slack",
+    triggerLabel: "Slack Webhook Trigger",
+    steps: [
+      {
+        service: "jira",
+        operation: "create-issue",
+        label: "Create Jira Ticket",
+      },
+      {
+        service: "github",
+        operation: "create-branch",
+        label: "Create GitHub Branch",
+      },
+      {
+        service: "google_sheets",
+        operation: "add-row",
+        label: "Update Spreadsheet",
+      },
+      {
+        service: "gmail",
+        operation: "send-email",
+        label: "Send Email",
+      },
+    ],
+  },
+];
+
 function getRequestUserId(req: unknown): string | undefined {
   const request = req as AuthenticatedRequest;
   return typeof request.userId === "string" ? request.userId : undefined;
@@ -60,6 +166,177 @@ function asRecord(value: unknown): Record<string, unknown> {
   }
 
   return value as Record<string, unknown>;
+}
+
+function asString(value: unknown): string {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  return "";
+}
+
+function ensureWebhookWaitingGraph(args: {
+  nodes: Workflow["nodes"];
+  edges: Workflow["edges"];
+}): { nodes: Workflow["nodes"]; edges: Workflow["edges"] } {
+  const nodes = Array.isArray(args.nodes) ? [...args.nodes] : [];
+  const edges = Array.isArray(args.edges) ? [...args.edges] : [];
+
+  const triggerIndex = nodes.findIndex((node) => node.type === "trigger");
+  if (triggerIndex >= 0) {
+    return {
+      nodes: nodes.map((node, index) => {
+        if (index !== triggerIndex) {
+          return node;
+        }
+
+        return {
+          ...node,
+          operation: node.operation || "on-webhook-event",
+          label: node.label || "Webhook Trigger",
+          config: {
+            ...(node.config || {}),
+            waitFor: "webhook",
+            triggerMode: "webhook_wait",
+          },
+          status: node.status || "pending",
+        };
+      }),
+      edges,
+    };
+  }
+
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  let triggerId = "trigger-webhook";
+  let triggerCounter = 1;
+  while (nodeIds.has(triggerId)) {
+    triggerId = `trigger-webhook-${triggerCounter}`;
+    triggerCounter += 1;
+  }
+
+  const firstNode = nodes[0];
+  const minX =
+    nodes.length > 0
+      ? Math.min(...nodes.map((node) => node.position?.x ?? 320))
+      : 320;
+
+  const triggerNode: Workflow["nodes"][number] = {
+    id: triggerId,
+    type: "trigger",
+    service: "postgres",
+    operation: "on-webhook-event",
+    label: "Webhook Trigger",
+    config: {
+      waitFor: "webhook",
+      triggerMode: "webhook_wait",
+    },
+    position: {
+      x: Math.max(minX - 240, 60),
+      y: firstNode?.position?.y ?? 80,
+    },
+    status: "pending",
+  };
+
+  if (!firstNode) {
+    return {
+      nodes: [triggerNode],
+      edges,
+    };
+  }
+
+  const edgeIds = new Set(edges.map((edge) => edge.id));
+  let edgeId = `edge-${triggerId}-${firstNode.id}`;
+  let edgeCounter = 1;
+  while (edgeIds.has(edgeId)) {
+    edgeId = `edge-${triggerId}-${firstNode.id}-${edgeCounter}`;
+    edgeCounter += 1;
+  }
+
+  return {
+    nodes: [triggerNode, ...nodes],
+    edges: [
+      {
+        id: edgeId,
+        source: triggerId,
+        target: firstNode.id,
+      },
+      ...edges,
+    ],
+  };
+}
+
+function buildDefaultWorkflowTemplate(
+  template: DefaultWorkflowTemplate,
+): Workflow {
+  const now = new Date().toISOString();
+  const triggerNodeId = `${template.id}-trigger`;
+
+  const nodes: Workflow["nodes"] = [
+    {
+      id: triggerNodeId,
+      type: "trigger",
+      service: template.triggerService,
+      operation: "on-webhook-event",
+      label: template.triggerLabel,
+      config: {
+        workflow: template.id,
+        waitFor: "webhook",
+        triggerMode: "webhook_wait",
+      },
+      position: { x: 120, y: 90 },
+      status: "pending",
+    },
+    ...template.steps.map((step, index) => ({
+      id: `${template.id}-step-${index + 1}`,
+      type: "action" as const,
+      service: step.service,
+      operation: step.operation,
+      label: step.label,
+      config: {},
+      position: { x: 120 + (index + 1) * 250, y: 90 },
+      status: "pending" as const,
+    })),
+  ];
+
+  const edges: Workflow["edges"] = nodes.slice(1).map((node, index) => ({
+    id: `${template.id}-edge-${index + 1}`,
+    source: nodes[index].id,
+    target: node.id,
+  }));
+
+  return {
+    id: template.id,
+    name: template.name,
+    description: template.description,
+    nodes,
+    edges,
+    status: "ready",
+    createdAt: now,
+    updatedAt: now,
+    executionHistory: [],
+    generatedJson: {
+      source: `webhook-${template.triggerService}-default`,
+      workflow: template.id,
+      template: true,
+      triggerMode: "webhook_wait",
+    },
+  };
+}
+
+function ensureDefaultWorkflowTemplates(workflows: Workflow[]): Workflow[] {
+  const existingIds = new Set(workflows.map((workflow) => workflow.id));
+  const missingTemplates = DEFAULT_WORKFLOW_TEMPLATES.filter(
+    (template) => !existingIds.has(template.id),
+  ).map((template) => buildDefaultWorkflowTemplate(template));
+
+  return missingTemplates.length > 0
+    ? [...missingTemplates, ...workflows]
+    : workflows;
 }
 
 function parseWorkflowListScope(value: unknown): WorkflowListScope {
@@ -98,6 +375,32 @@ function isDefaultWorkflow(workflow: Workflow): boolean {
   }
 
   return false;
+}
+
+function isWebhookWaitingWorkflow(workflow: Workflow): boolean {
+  const generatedJson = asRecord(workflow.generatedJson);
+  const triggerMode = asString(generatedJson.triggerMode).toLowerCase();
+  const waitFor = asString(generatedJson.waitFor).toLowerCase();
+
+  if (triggerMode === "webhook_wait" || waitFor === "webhook") {
+    return true;
+  }
+
+  const triggerNode = workflow.nodes.find((node) => node.type === "trigger");
+  if (!triggerNode) {
+    return false;
+  }
+
+  const triggerConfig = asRecord(triggerNode.config);
+  const configTriggerMode = asString(triggerConfig.triggerMode).toLowerCase();
+  const configWaitFor = asString(triggerConfig.waitFor).toLowerCase();
+  const operation = asString(triggerNode.operation).toLowerCase();
+
+  return (
+    configTriggerMode === "webhook_wait" ||
+    configWaitFor === "webhook" ||
+    operation === "on-webhook-event"
+  );
 }
 
 function normalizeNodeService(value?: string): WorkflowNodeService {
@@ -259,17 +562,21 @@ function buildStoredWorkflowFromAgenticPayload(args: {
     }));
   }
 
+  const webhookGraph = ensureWebhookWaitingGraph({ nodes, edges });
+
   const workflow = dataStore.createWorkflow({
     name: `Agentic Flow: ${args.prompt.slice(0, 64)}`,
     description: args.prompt,
-    nodes,
-    edges,
+    nodes: webhookGraph.nodes,
+    edges: webhookGraph.edges,
     status: "ready",
     ownerUserId: args.ownerUserId,
     generatedJson: {
       source: "agentic-flow",
       prompt: args.prompt,
       plan: payloadRecord,
+      triggerMode: "webhook_wait",
+      waitFor: "webhook",
     },
   });
 
@@ -409,12 +716,15 @@ router.get("/", async (req, res) => {
     ? await listWorkflowDefinitions(userId)
     : dataStore.getWorkflows();
 
+  const workflowPool =
+    scope === "default" ? ensureDefaultWorkflowTemplates(workflows) : workflows;
+
   const scoped =
     scope === "default"
-      ? workflows.filter((workflow) => isDefaultWorkflow(workflow))
+      ? workflowPool.filter((workflow) => isDefaultWorkflow(workflow))
       : scope === "user"
-        ? workflows.filter((workflow) => !isDefaultWorkflow(workflow))
-        : workflows;
+        ? workflowPool.filter((workflow) => !isDefaultWorkflow(workflow))
+        : workflowPool;
 
   const filtered = query
     ? scoped.filter(
@@ -570,11 +880,30 @@ router.get("/:id/audits", async (req, res) => {
 
 // POST /api/workflows - Create a new workflow
 router.post("/", async (req, res) => {
-  const { name, description, nodes, edges, status } = req.body;
-  const generatedJson =
+  const name = asString(req.body?.name);
+  const description = asString(req.body?.description);
+  const rawNodes = Array.isArray(req.body?.nodes)
+    ? (req.body.nodes as Workflow["nodes"])
+    : [];
+  const rawEdges = Array.isArray(req.body?.edges)
+    ? (req.body.edges as Workflow["edges"])
+    : [];
+  const workflowGraph = ensureWebhookWaitingGraph({
+    nodes: rawNodes,
+    edges: rawEdges,
+  });
+  const generatedJsonBase =
     req.body?.generatedJson && typeof req.body.generatedJson === "object"
       ? (req.body.generatedJson as Record<string, unknown>)
-      : undefined;
+      : {};
+  const generatedJson: Record<string, unknown> = {
+    ...generatedJsonBase,
+    source: asString(generatedJsonBase.source) || "user-create",
+    triggerMode: "webhook_wait",
+    waitFor: "webhook",
+  };
+
+  const status: Workflow["status"] = "ready";
   const userId = getRequestUserId(req);
 
   if (!name) {
@@ -586,10 +915,10 @@ router.post("/", async (req, res) => {
 
   const workflow = dataStore.createWorkflow({
     name,
-    description: description || "",
-    nodes: nodes || [],
-    edges: edges || [],
-    status: status || "draft",
+    description,
+    nodes: workflowGraph.nodes,
+    edges: workflowGraph.edges,
+    status,
     generatedJson,
     ownerUserId: userId,
   });
@@ -675,8 +1004,30 @@ router.delete("/:id", async (req, res) => {
 });
 
 // POST /api/workflows/:id/execute - Execute a workflow
-router.post("/:id/execute", (req, res) => {
-  const execution = dataStore.createExecution(req.params.id);
+router.post("/:id/execute", async (req, res) => {
+  const workflowId = req.params.id;
+  const userId = getRequestUserId(req);
+
+  const workflow = isPostgresReady()
+    ? await getWorkflowDefinition(workflowId, userId)
+    : dataStore.getWorkflow(workflowId);
+
+  if (!workflow) {
+    return res.status(404).json({
+      success: false,
+      error: "Workflow not found",
+    });
+  }
+
+  if (isWebhookWaitingWorkflow(workflow)) {
+    return res.status(409).json({
+      success: false,
+      error:
+        "This workflow waits for webhook events and cannot be executed manually.",
+    });
+  }
+
+  const execution = dataStore.createExecution(workflowId);
 
   if (!execution) {
     return res.status(404).json({
@@ -1003,19 +1354,26 @@ router.post("/generate", async (req, res) => {
     edges.push({ id: "edge-1", source: "node-1", target: "node-2" });
   }
 
+  const workflowGraph = ensureWebhookWaitingGraph({
+    nodes: nodes as Workflow["nodes"],
+    edges,
+  });
+
   // Create the workflow
   const workflow = dataStore.createWorkflow({
     name: `Generated: ${prompt.substring(0, 30)}...`,
     description: prompt,
-    nodes: nodes as Workflow["nodes"],
-    edges,
-    status: "draft",
+    nodes: workflowGraph.nodes,
+    edges: workflowGraph.edges,
+    status: "ready",
     ownerUserId: userId,
     generatedJson: {
       source: "generate",
       prompt,
-      nodes,
-      edges,
+      nodes: workflowGraph.nodes,
+      edges: workflowGraph.edges,
+      triggerMode: "webhook_wait",
+      waitFor: "webhook",
     },
   });
 
