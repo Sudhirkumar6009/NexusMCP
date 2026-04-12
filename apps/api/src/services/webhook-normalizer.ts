@@ -137,6 +137,7 @@ function normalizeGitHubWebhook(
     source: "github",
     event: eventType,
     data: {
+      delivery_id: headerAsString(headers, "x-github-delivery"),
       repository:
         asString(repository.name) ||
         asString(repository.full_name) ||

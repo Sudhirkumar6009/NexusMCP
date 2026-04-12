@@ -1,4 +1,3 @@
-
 import { Router } from "express";
 import { createSign } from "crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -612,6 +611,9 @@ async function validateGmailCredentials(
   const explicitRefreshToken = normalizeOptionalString(
     credentials.refreshToken,
   );
+  const envRefreshToken = normalizeOptionalString(
+    process.env.GMAIL_REFRESH_TOKEN,
+  );
   const envAccessToken = normalizeOptionalString(
     process.env.GMAIL_ACCESS_TOKEN,
   );
@@ -625,7 +627,8 @@ async function validateGmailCredentials(
   const oauthUser = await loadUserGoogleOAuthState(userId);
   let refreshToken =
     explicitRefreshToken ||
-    normalizeOptionalString(oauthUser?.googleRefreshToken);
+    normalizeOptionalString(oauthUser?.googleRefreshToken) ||
+    envRefreshToken;
   accessToken =
     accessToken ||
     normalizeOptionalString(oauthUser?.googleAccessToken) ||
@@ -702,7 +705,7 @@ async function validateGmailCredentials(
   return {
     credentials: {
       accessToken,
-      ...(explicitRefreshToken ? { refreshToken: explicitRefreshToken } : {}),
+      ...(refreshToken ? { refreshToken } : {}),
     },
     metadata: {
       emailAddress: normalizeOptionalString(tokenInfo.email),

@@ -150,6 +150,27 @@ export const workflowsApi = {
       },
     ),
 
+  listMissingDetailsMemory: (options?: { scope?: string; keys?: string[] }) => {
+    const params = new URLSearchParams();
+    if (options?.scope) {
+      params.set("scope", options.scope);
+    }
+    if (options?.keys && options.keys.length > 0) {
+      params.set("keys", options.keys.join(","));
+    }
+
+    const query = params.toString();
+    return fetchApi<MissingDetailMemoryItem[]>(
+      `/workflows/missing-details-memory${query ? `?${query}` : ""}`,
+    );
+  },
+
+  deleteMissingDetailsMemory: (memoryId: string) =>
+    fetchApi<void>(
+      `/workflows/missing-details-memory/${encodeURIComponent(memoryId)}`,
+      { method: "DELETE" },
+    ),
+
   pause: (id: string) =>
     fetchApi<Workflow>(`/workflows/${id}/pause`, { method: "POST" }),
 
@@ -491,6 +512,19 @@ interface WorkflowRetryResult {
     output?: unknown;
     error?: string;
   }>;
+}
+
+export interface MissingDetailMemoryItem {
+  memoryId: string;
+  ownerUserId: string;
+  detailKey: string;
+  detailValue: string;
+  scope: string;
+  toolName?: string;
+  useCount: number;
+  lastUsedAt: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 interface NodeExecutionResult {

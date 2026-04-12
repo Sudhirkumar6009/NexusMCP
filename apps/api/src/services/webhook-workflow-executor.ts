@@ -8,6 +8,12 @@ import {
   saveWorkflowDefinition,
   saveWorkflowExecution,
 } from "./postgres-store.js";
+import {
+  buildJiraIssueLoopSignal,
+  buildSlackLoopSignals,
+  rememberGithubRefLoopSignal,
+  rememberOutboundWebhookSignals,
+} from "./webhook-loop-guard.js";
 import type { MCPResponse, Workflow } from "../types/index.js";
 import type {
   NormalizedWebhookEvent,
@@ -37,6 +43,7 @@ type WebhookStepResult = {
 
 type GithubExecutionContext = {
   event: string;
+  deliveryId: string;
   repository: string;
   ref: string;
   sender: string;
@@ -226,6 +233,7 @@ function buildGithubExecutionContext(
 
   return {
     event: event.event,
+    deliveryId: asString(payload.delivery_id),
     repository: asString(payload.repository) || "unknown-repo",
     ref: asString(payload.ref),
     sender: asString(payload.sender) || "unknown-user",
@@ -234,6 +242,61 @@ function buildGithubExecutionContext(
     after: asString(payload.after),
     issueKey: "",
   };
+}
+
+function captureLoopSignalsForSuccessfulStep(args: {
+  stepId: string;
+  executionId: string;
+  inputPayload: Record<string, unknown>;
+  outputPayload: Record<string, unknown>;
+  issueKey: string;
+}): void {
+  if (args.stepId === "jira-create") {
+    const issueKey =
+      args.issueKey ||
+      asString(args.outputPayload.issueKey) ||
+      asString(args.outputPayload.issue_key) ||
+      asString(args.outputPayload.key);
+
+    const issueSignal = buildJiraIssueLoopSignal(issueKey);
+    if (issueSignal) {
+      rememberOutboundWebhookSignals({
+        source: "jira",
+        signals: [issueSignal],
+        executionId: args.executionId,
+        stepId: args.stepId,
+      });
+    }
+
+    return;
+  }
+
+  if (args.stepId === "slack-post") {
+    const signals = buildSlackLoopSignals({
+      channel: asString(args.inputPayload.channel),
+      text: asString(args.inputPayload.text),
+    });
+
+    if (signals.length > 0) {
+      rememberOutboundWebhookSignals({
+        source: "slack",
+        signals,
+        executionId: args.executionId,
+        stepId: args.stepId,
+      });
+    }
+
+    return;
+  }
+
+  if (args.stepId === "github-create-branch") {
+    rememberGithubRefLoopSignal({
+      repository: asString(args.inputPayload.repo),
+      ref: asString(args.outputPayload.ref) || asString(args.inputPayload.ref),
+      executionId: args.executionId,
+      stepId: args.stepId,
+    });
+  }
 }
 
 function buildGithubWorkflowDescription(
@@ -245,6 +308,68 @@ function buildGithubWorkflowDescription(
   const actorLine = `Actor: ${context.sender}`;
 
   return `${triggerLine} | ${repoLine} | ${refLine} | ${actorLine}`;
+}
+
+function shortCommitHash(value: string): string {
+  const normalized = value.trim();
+  if (!normalized) {
+    return "";
+  }
+
+  return normalized.slice(0, 7);
+}
+
+function buildWebhookEmailDetails(args: {
+  context: GithubExecutionContext;
+  workflowId: string;
+  executionId: string;
+  startedAt: string;
+  retryOfExecutionId?: string;
+  stepResults: WebhookStepResult[];
+}): string {
+  const commitBefore = shortCommitHash(args.context.before);
+  const commitAfter = shortCommitHash(args.context.after);
+  const commitRange =
+    commitBefore && commitAfter
+      ? `${commitBefore} -> ${commitAfter}`
+      : commitAfter || commitBefore || "n/a";
+
+  const completedSteps =
+    args.stepResults.length > 0
+      ? args.stepResults
+          .map((step, index) => {
+            const error = asString(step.error);
+            return error
+              ? `${index + 1}. ${step.method} | ${step.status.toUpperCase()} | ${error}`
+              : `${index + 1}. ${step.method} | ${step.status.toUpperCase()}`;
+          })
+          .join("\n")
+      : "No prior steps completed before email notification.";
+
+  const lines = [
+    "Workflow Execution Summary",
+    `Workflow: ${GITHUB_DEFAULT_WORKFLOW_NAME}`,
+    `Workflow ID: ${args.workflowId}`,
+    `Execution ID: ${args.executionId}`,
+    `Started At: ${args.startedAt}`,
+    `Generated At: ${nowIso()}`,
+    `Trigger Event: ${args.context.event}`,
+    `Delivery ID: ${args.context.deliveryId || "n/a"}`,
+    `Repository: ${args.context.repository}`,
+    `Ref: ${args.context.ref || "n/a"}`,
+    `Sender: ${args.context.sender}`,
+    `Pusher: ${args.context.pusher}`,
+    `Commit Range: ${commitRange}`,
+    `Jira Issue: ${args.context.issueKey || "not-created"}`,
+  ];
+
+  if (args.retryOfExecutionId) {
+    lines.push(`Retry Of Execution: ${args.retryOfExecutionId}`);
+  }
+
+  lines.push("", "Completed Steps:", completedSteps);
+
+  return lines.join("\n");
 }
 
 function buildGithubWorkflowGraph(context: GithubExecutionContext): {
@@ -466,6 +591,7 @@ function buildGithubStepPlan(): WorkflowStepPlan[] {
           sheet_name: sheetName,
           row: {
             timestamp: nowIso(),
+            delivery_id: context.deliveryId,
             repository: context.repository,
             ref: context.ref,
             sender: context.sender,
@@ -475,7 +601,7 @@ function buildGithubStepPlan(): WorkflowStepPlan[] {
             after: context.after,
             event: context.event,
           },
-          unique_by: ["repository", "after", "event"],
+          unique_by: ["delivery_id", "execution_id"],
         };
 
         if (spreadsheetId) {
@@ -611,6 +737,37 @@ async function executeGithubDefaultWorkflow(
       missingDetails,
     });
 
+    if (step.id === "gmail-send") {
+      const existingSubject = asString(inputPayload.subject);
+      const existingBody = asString(inputPayload.body);
+      const detailedBody = buildWebhookEmailDetails({
+        context,
+        workflowId,
+        executionId,
+        startedAt,
+        retryOfExecutionId: options?.retryOfExecutionId,
+        stepResults,
+      });
+
+      inputPayload.subject = context.issueKey
+        ? `[${context.issueKey}] ${existingSubject || `GitHub webhook workflow result: ${context.repository}`}`
+        : existingSubject ||
+          `GitHub webhook workflow result: ${context.repository}`;
+
+      inputPayload.body = existingBody
+        ? `${existingBody}\n\n---\n${detailedBody}`
+        : detailedBody;
+    }
+
+    if (step.id === "sheets-add-row") {
+      const row = asRecord(inputPayload.row);
+      inputPayload.row = {
+        ...row,
+        execution_id: executionId,
+        workflow_id: workflowId,
+      };
+    }
+
     nodes = setNodeStatus(nodes, step.nodeId, "running");
     await persistWorkflowSnapshot({
       usePostgres,
@@ -686,6 +843,16 @@ async function executeGithubDefaultWorkflow(
         missingDetailKeys,
       },
     });
+
+    if (success) {
+      captureLoopSignalsForSuccessfulStep({
+        stepId: step.id,
+        executionId,
+        inputPayload,
+        outputPayload,
+        issueKey: context.issueKey,
+      });
+    }
 
     stepResults.push({
       id: step.id,

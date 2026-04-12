@@ -566,6 +566,9 @@ export default function PastExecutionsPage() {
   const [missingDetailValues, setMissingDetailValues] = useState<
     Record<string, string>
   >({});
+  const [prefilledMissingKeys, setPrefilledMissingKeys] = useState<string[]>(
+    [],
+  );
   const [retryError, setRetryError] = useState<string | null>(null);
   const [retryInfo, setRetryInfo] = useState<string | null>(null);
   const [isRetrying, setIsRetrying] = useState(false);
@@ -732,16 +735,58 @@ export default function PastExecutionsPage() {
   );
 
   useEffect(() => {
-    const nextValues: Record<string, string> = {};
-    for (const prompt of missingDetailPrompts) {
-      nextValues[prompt.key] = "";
-    }
+    let isActive = true;
 
-    setMissingDetailValues(nextValues);
-    setRetryError(null);
-    setRetryInfo(null);
-    setIsMissingDetailsModalOpen(false);
-  }, [missingPromptSignature, selectedExecutionId]);
+    const hydrateMissingDetailValues = async () => {
+      const nextValues: Record<string, string> = {};
+      for (const prompt of missingDetailPrompts) {
+        nextValues[prompt.key] = "";
+      }
+
+      const keys = missingDetailPrompts.map((prompt) => prompt.key);
+      const prefilledKeys: string[] = [];
+
+      if (keys.length > 0) {
+        try {
+          const response = await workflowsApi.listMissingDetailsMemory({
+            scope: "missing-details",
+            keys,
+          });
+
+          if (response.success && Array.isArray(response.data)) {
+            for (const entry of response.data) {
+              if (!entry.detailKey || !keys.includes(entry.detailKey)) {
+                continue;
+              }
+
+              nextValues[entry.detailKey] = entry.detailValue || "";
+              if (entry.detailValue) {
+                prefilledKeys.push(entry.detailKey);
+              }
+            }
+          }
+        } catch {
+          // Ignore prefill failures and continue with blank values.
+        }
+      }
+
+      if (!isActive) {
+        return;
+      }
+
+      setMissingDetailValues(nextValues);
+      setPrefilledMissingKeys(prefilledKeys);
+      setRetryError(null);
+      setRetryInfo(null);
+      setIsMissingDetailsModalOpen(false);
+    };
+
+    void hydrateMissingDetailValues();
+
+    return () => {
+      isActive = false;
+    };
+  }, [missingDetailPrompts, missingPromptSignature, selectedExecutionId]);
 
   const openMissingDetailsModal = useCallback(() => {
     setRetryError(null);
@@ -1057,19 +1102,28 @@ export default function PastExecutionsPage() {
                       </p>
                     </div>
                     <div className="rounded-md border border-border bg-surface-secondary p-3">
-                      <p className="text-xs text-content-secondary">Repository</p>
+                      <p className="text-xs text-content-secondary">
+                        Repository
+                      </p>
                       <p className="mt-1 text-sm font-medium text-content-primary">
                         {selectedExecution.triggerInfo.repository || "N/A"}
                       </p>
                     </div>
                   </div>
 
-                  <details className="rounded-md border border-border bg-surface-secondary p-3" open>
+                  <details
+                    className="rounded-md border border-border bg-surface-secondary p-3"
+                    open
+                  >
                     <summary className="cursor-pointer text-sm font-medium text-content-primary">
                       Trigger Payload JSON
                     </summary>
                     <pre className="mt-2 max-h-44 overflow-auto text-xs text-content-primary">
-                      {JSON.stringify(selectedExecution.triggerPayload, null, 2)}
+                      {JSON.stringify(
+                        selectedExecution.triggerPayload,
+                        null,
+                        2,
+                      )}
                     </pre>
                   </details>
                 </CardContent>
@@ -1304,6 +1358,11 @@ export default function PastExecutionsPage() {
                   <p className="mt-2 text-xs text-content-secondary">
                     {prompt.toolName} • {prompt.stepId}
                   </p>
+                  {prefilledMissingKeys.includes(prompt.key) ? (
+                    <p className="mt-1 text-xs text-success">
+                      Prefilled from Saved Data
+                    </p>
+                  ) : null}
                   <p className="mt-1 text-xs text-content-secondary">
                     {prompt.reason}
                   </p>

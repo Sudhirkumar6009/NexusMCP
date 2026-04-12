@@ -2,13 +2,17 @@ import { Router } from "express";
 import { dataStore } from "../data/store.js";
 import type { Workflow } from "../types/index.js";
 import {
+  deleteMissingDetailMemory,
   deleteWorkflowDefinition,
   getEventLogs,
   getStepRuns,
   getWorkflowDefinition,
   isPostgresReady,
+  listMissingDetailMemory,
   listWorkflowDefinitions,
   saveWorkflowDefinition,
+  upsertMissingDetailMemory,
+  type MissingDetailMemoryRecord,
   type StepRunRecord,
 } from "../services/postgres-store.js";
 import { executeWebhookWorkflow } from "../services/webhook-workflow-executor.js";
@@ -158,6 +162,11 @@ const DEFAULT_WORKFLOW_TEMPLATES: DefaultWorkflowTemplate[] = [
     ],
   },
 ];
+
+const missingDetailMemoryFallback = new Map<
+  string,
+  MissingDetailMemoryRecord
+>();
 
 function getRequestUserId(req: unknown): string | undefined {
   const request = req as AuthenticatedRequest;
@@ -407,12 +416,172 @@ function isWebhookWaitingWorkflow(workflow: Workflow): boolean {
   );
 }
 
+function normalizeMissingDetailKey(rawKey: string): string {
+  const normalized = rawKey
+    .trim()
+    .toLowerCase()
+    .replace(/["'`]/g, "")
+    .replace(/[\s-]+/g, "_")
+    .replace(/[^a-z0-9_.]/g, "")
+    .replace(/^_+|_+$/g, "");
+
+  if (!normalized) {
+    return "";
+  }
+
+  if (
+    normalized === "recipient" ||
+    normalized === "recipient_email" ||
+    normalized === "to_email" ||
+    normalized === "email_to" ||
+    normalized === "email_address" ||
+    normalized === "receiver" ||
+    normalized === "receiver_email"
+  ) {
+    return "to";
+  }
+
+  if (normalized === "sheetid" || normalized === "spreadsheetid") {
+    return "sheet_id";
+  }
+
+  return normalized;
+}
+
+function normalizeMissingDetailScope(rawScope: unknown): string {
+  const normalized = asString(rawScope).toLowerCase();
+  return normalized || "missing-details";
+}
+
+function normalizeMissingDetailMemoryOwner(ownerUserId?: string): string {
+  const normalized = asString(ownerUserId);
+  return normalized || "anonymous";
+}
+
+function fallbackMemoryCompositeKey(args: {
+  ownerUserId?: string;
+  scope?: string;
+  detailKey: string;
+}): string {
+  const owner = normalizeMissingDetailMemoryOwner(args.ownerUserId);
+  const scope = normalizeMissingDetailScope(args.scope);
+  return `${owner}::${scope}::${args.detailKey}`;
+}
+
+function upsertMissingDetailMemoryFallback(args: {
+  ownerUserId?: string;
+  detailKey: string;
+  detailValue: string;
+  scope?: string;
+  toolName?: string;
+}): MissingDetailMemoryRecord {
+  const ownerUserId = normalizeMissingDetailMemoryOwner(args.ownerUserId);
+  const scope = normalizeMissingDetailScope(args.scope);
+  const detailKey = normalizeMissingDetailKey(args.detailKey);
+  const detailValue = asString(args.detailValue);
+  const now = new Date().toISOString();
+
+  const compositeKey = fallbackMemoryCompositeKey({
+    ownerUserId,
+    scope,
+    detailKey,
+  });
+
+  const existing = missingDetailMemoryFallback.get(compositeKey);
+  if (existing) {
+    const updated: MissingDetailMemoryRecord = {
+      ...existing,
+      detailValue,
+      toolName: args.toolName || existing.toolName,
+      useCount: existing.useCount + 1,
+      lastUsedAt: now,
+      updatedAt: now,
+    };
+    missingDetailMemoryFallback.set(compositeKey, updated);
+    return updated;
+  }
+
+  const created: MissingDetailMemoryRecord = {
+    memoryId: `mem-fallback-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+    ownerUserId,
+    detailKey,
+    detailValue,
+    scope,
+    toolName: args.toolName,
+    useCount: 1,
+    lastUsedAt: now,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  missingDetailMemoryFallback.set(compositeKey, created);
+  return created;
+}
+
+function listMissingDetailMemoryFallback(args: {
+  ownerUserId?: string;
+  scope?: string;
+  keys?: string[];
+}): MissingDetailMemoryRecord[] {
+  const ownerUserId = normalizeMissingDetailMemoryOwner(args.ownerUserId);
+  const scope = normalizeMissingDetailScope(args.scope);
+  const keyFilter = new Set(
+    (args.keys || [])
+      .map((key) => normalizeMissingDetailKey(key))
+      .filter((key) => key.length > 0),
+  );
+
+  return [...missingDetailMemoryFallback.values()]
+    .filter((entry) => {
+      if (entry.ownerUserId !== ownerUserId) {
+        return false;
+      }
+
+      if (scope !== "all" && entry.scope !== scope) {
+        return false;
+      }
+
+      if (keyFilter.size > 0 && !keyFilter.has(entry.detailKey)) {
+        return false;
+      }
+
+      return true;
+    })
+    .sort(
+      (a, b) =>
+        new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+    );
+}
+
+function deleteMissingDetailMemoryFallback(args: {
+  ownerUserId?: string;
+  memoryId: string;
+}): boolean {
+  const ownerUserId = normalizeMissingDetailMemoryOwner(args.ownerUserId);
+  const memoryId = asString(args.memoryId);
+  if (!memoryId) {
+    return false;
+  }
+
+  const existing = [...missingDetailMemoryFallback.entries()].find(
+    ([, value]) =>
+      value.ownerUserId === ownerUserId && value.memoryId === memoryId,
+  );
+
+  if (!existing) {
+    return false;
+  }
+
+  missingDetailMemoryFallback.delete(existing[0]);
+  return true;
+}
+
 function parseMissingDetailValues(payload: unknown): Record<string, string> {
   const record = asRecord(payload);
   const normalized: Record<string, string> = {};
 
   for (const [rawKey, rawValue] of Object.entries(record)) {
-    const key = rawKey.trim().toLowerCase();
+    const key = normalizeMissingDetailKey(rawKey);
     const value = asString(rawValue);
 
     if (!key || !value) {
@@ -890,6 +1059,70 @@ router.get("/", async (req, res) => {
   });
 });
 
+// GET /api/workflows/missing-details-memory - List saved missing detail values
+router.get("/missing-details-memory", async (req, res) => {
+  const userId = getRequestUserId(req);
+  const scope = normalizeMissingDetailScope(req.query.scope);
+  const keysRaw = asString(req.query.keys);
+  const keys = keysRaw
+    ? keysRaw
+        .split(",")
+        .map((key) => normalizeMissingDetailKey(key))
+        .filter((key) => key.length > 0)
+    : [];
+
+  const rows = isPostgresReady()
+    ? await listMissingDetailMemory({
+        ownerUserId: userId,
+        scope,
+        keys,
+        limit: 500,
+        offset: 0,
+      })
+    : listMissingDetailMemoryFallback({
+        ownerUserId: userId,
+        scope,
+        keys,
+      });
+
+  res.json({
+    success: true,
+    data: rows,
+  });
+});
+
+// DELETE /api/workflows/missing-details-memory/:memoryId - Delete saved value
+router.delete("/missing-details-memory/:memoryId", async (req, res) => {
+  const userId = getRequestUserId(req);
+  const memoryId = asString(req.params.memoryId);
+
+  if (!memoryId) {
+    return res.status(400).json({
+      success: false,
+      error: "memoryId is required",
+    });
+  }
+
+  const deleted = isPostgresReady()
+    ? await deleteMissingDetailMemory(memoryId, userId)
+    : deleteMissingDetailMemoryFallback({
+        ownerUserId: userId,
+        memoryId,
+      });
+
+  if (!deleted) {
+    return res.status(404).json({
+      success: false,
+      error: "Saved data not found",
+    });
+  }
+
+  res.json({
+    success: true,
+    message: "Saved data deleted",
+  });
+});
+
 // GET /api/workflows/:id - Get a single workflow
 router.get("/:id", async (req, res) => {
   const userId = getRequestUserId(req);
@@ -1256,6 +1489,24 @@ router.post(
           "Retry with missing details is currently available for the GitHub default webhook workflow only.",
       });
     }
+
+    const failedToolName =
+      stepRunResult.rows.find((step) => {
+        const status = asString(step.status).toLowerCase();
+        return status === "failed" || status === "error";
+      })?.toolName || "";
+
+    await Promise.all(
+      Object.entries(missingDetails).map(([detailKey, detailValue]) =>
+        upsertMissingDetailMemory({
+          ownerUserId: userId,
+          detailKey,
+          detailValue,
+          scope: "missing-details",
+          toolName: failedToolName || undefined,
+        }),
+      ),
+    );
 
     const retryEvent = buildRetryWebhookEventFromStepRuns(stepRunResult.rows);
     const retriedExecution = await executeWebhookWorkflow({

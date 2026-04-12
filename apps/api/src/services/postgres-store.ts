@@ -1,4 +1,4 @@
-import { randomBytes, createCipheriv, createHash } from "crypto";
+import { randomBytes, createCipheriv, createHash, randomUUID } from "crypto";
 import type { AuditLog, Workflow, WorkflowExecution } from "../types/index.js";
 import {
   getPostgresPool,
@@ -52,11 +52,22 @@ export type ServiceConnectionRecord = {
   updatedAt: string;
 };
 
+export type MissingDetailMemoryRecord = {
+  memoryId: string;
+  ownerUserId: string;
+  detailKey: string;
+  detailValue: string;
+  scope: string;
+  toolName?: string;
+  useCount: number;
+  lastUsedAt: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 let postgresReady = false;
 
-const optionalSchemaStatements = [
-  `CREATE EXTENSION IF NOT EXISTS "pgcrypto";`,
-];
+const optionalSchemaStatements = [`CREATE EXTENSION IF NOT EXISTS "pgcrypto";`];
 
 const requiredSchemaStatements = [
   `CREATE TABLE IF NOT EXISTS workflow_definitions (
@@ -134,6 +145,22 @@ const requiredSchemaStatements = [
       value JSONB NOT NULL,
       PRIMARY KEY (execution_id, key)
     );`,
+  `CREATE TABLE IF NOT EXISTS missing_detail_memory (
+      memory_id TEXT PRIMARY KEY,
+      owner_user_id TEXT NOT NULL,
+      detail_key TEXT NOT NULL,
+      detail_value TEXT NOT NULL,
+      scope TEXT NOT NULL DEFAULT 'global',
+      tool_name TEXT,
+      use_count INTEGER NOT NULL DEFAULT 1,
+      last_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_missing_detail_memory_owner_scope_key
+     ON missing_detail_memory(owner_user_id, scope, detail_key);`,
+  `CREATE INDEX IF NOT EXISTS idx_missing_detail_memory_owner_updated
+     ON missing_detail_memory(owner_user_id, updated_at DESC);`,
   `CREATE INDEX IF NOT EXISTS idx_event_logs_timestamp ON event_logs(timestamp DESC);`,
   `CREATE INDEX IF NOT EXISTS idx_event_logs_level ON event_logs(level);`,
   `CREATE INDEX IF NOT EXISTS idx_event_logs_service ON event_logs(service);`,
@@ -504,7 +531,9 @@ export async function saveServiceConnection(args: {
   );
 }
 
-export async function listServiceConnections(): Promise<ServiceConnectionRecord[]> {
+export async function listServiceConnections(): Promise<
+  ServiceConnectionRecord[]
+> {
   if (!postgresReady) {
     return [];
   }
@@ -819,4 +848,195 @@ export async function saveExecutionContext(args: {
        value = EXCLUDED.value`,
     [args.executionId, args.key, JSON.stringify(args.value)],
   );
+}
+
+function normalizeMissingDetailMemoryOwner(ownerUserId?: string): string {
+  const trimmed = (ownerUserId || "").trim();
+  return trimmed || "anonymous";
+}
+
+function normalizeMissingDetailMemoryScope(scope?: string): string {
+  const trimmed = (scope || "").trim().toLowerCase();
+  return trimmed || "global";
+}
+
+function parseMissingDetailMemoryRow(
+  row: Record<string, unknown>,
+): MissingDetailMemoryRecord {
+  return {
+    memoryId: String(row.memory_id || ""),
+    ownerUserId: String(row.owner_user_id || "anonymous"),
+    detailKey: String(row.detail_key || ""),
+    detailValue: String(row.detail_value || ""),
+    scope: String(row.scope || "global"),
+    toolName:
+      typeof row.tool_name === "string" && row.tool_name.trim().length > 0
+        ? row.tool_name.trim()
+        : undefined,
+    useCount: Number(row.use_count ?? 0),
+    lastUsedAt: new Date(
+      String(row.last_used_at || new Date().toISOString()),
+    ).toISOString(),
+    createdAt: new Date(
+      String(row.created_at || new Date().toISOString()),
+    ).toISOString(),
+    updatedAt: new Date(
+      String(row.updated_at || new Date().toISOString()),
+    ).toISOString(),
+  };
+}
+
+export async function upsertMissingDetailMemory(args: {
+  ownerUserId?: string;
+  detailKey: string;
+  detailValue: string;
+  scope?: string;
+  toolName?: string;
+}): Promise<MissingDetailMemoryRecord | null> {
+  if (!postgresReady) return null;
+
+  const ownerUserId = normalizeMissingDetailMemoryOwner(args.ownerUserId);
+  const detailKey = args.detailKey.trim().toLowerCase();
+  const detailValue = args.detailValue.trim();
+  const scope = normalizeMissingDetailMemoryScope(args.scope);
+
+  if (!detailKey || !detailValue) {
+    return null;
+  }
+
+  const result = await query(
+    `INSERT INTO missing_detail_memory (
+       memory_id,
+       owner_user_id,
+       detail_key,
+       detail_value,
+       scope,
+       tool_name,
+       use_count,
+       last_used_at,
+       updated_at,
+       created_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, 1, NOW(), NOW(), NOW())
+     ON CONFLICT (owner_user_id, scope, detail_key)
+     DO UPDATE SET
+       detail_value = EXCLUDED.detail_value,
+       tool_name = COALESCE(EXCLUDED.tool_name, missing_detail_memory.tool_name),
+       use_count = missing_detail_memory.use_count + 1,
+       last_used_at = NOW(),
+       updated_at = NOW()
+     RETURNING
+       memory_id,
+       owner_user_id,
+       detail_key,
+       detail_value,
+       scope,
+       tool_name,
+       use_count,
+       last_used_at,
+       created_at,
+       updated_at`,
+    [
+      `mdm-${randomUUID()}`,
+      ownerUserId,
+      detailKey,
+      detailValue,
+      scope,
+      args.toolName?.trim() || null,
+    ],
+  );
+
+  if (result.rows.length === 0) {
+    return null;
+  }
+
+  return parseMissingDetailMemoryRow(result.rows[0] as Record<string, unknown>);
+}
+
+export async function listMissingDetailMemory(args?: {
+  ownerUserId?: string;
+  scope?: string;
+  keys?: string[];
+  limit?: number;
+  offset?: number;
+}): Promise<MissingDetailMemoryRecord[]> {
+  if (!postgresReady) {
+    return [];
+  }
+
+  const ownerUserId = normalizeMissingDetailMemoryOwner(args?.ownerUserId);
+  const where: string[] = ["owner_user_id = $1"];
+  const params: unknown[] = [ownerUserId];
+
+  const scope = normalizeMissingDetailMemoryScope(args?.scope);
+  if (scope !== "all") {
+    params.push(scope);
+    where.push(`scope = $${params.length}`);
+  }
+
+  const keys = (args?.keys || [])
+    .map((key) => key.trim().toLowerCase())
+    .filter((key) => key.length > 0);
+
+  if (keys.length > 0) {
+    params.push(keys);
+    where.push(`detail_key = ANY($${params.length}::text[])`);
+  }
+
+  const limitRaw = Number(args?.limit ?? 200);
+  const offsetRaw = Number(args?.offset ?? 0);
+  const limit = Number.isFinite(limitRaw)
+    ? Math.min(Math.max(Math.floor(limitRaw), 1), 1000)
+    : 200;
+  const offset = Number.isFinite(offsetRaw)
+    ? Math.max(Math.floor(offsetRaw), 0)
+    : 0;
+
+  params.push(limit, offset);
+
+  const whereClause = `WHERE ${where.join(" AND ")}`;
+  const result = await query(
+    `SELECT
+       memory_id,
+       owner_user_id,
+       detail_key,
+       detail_value,
+       scope,
+       tool_name,
+       use_count,
+       last_used_at,
+       created_at,
+       updated_at
+     FROM missing_detail_memory
+     ${whereClause}
+     ORDER BY updated_at DESC
+     LIMIT $${params.length - 1}
+     OFFSET $${params.length}`,
+    params,
+  );
+
+  return result.rows.map((row) =>
+    parseMissingDetailMemoryRow(row as Record<string, unknown>),
+  );
+}
+
+export async function deleteMissingDetailMemory(
+  memoryId: string,
+  ownerUserId?: string,
+): Promise<boolean> {
+  if (!postgresReady) return false;
+
+  const normalizedMemoryId = memoryId.trim();
+  if (!normalizedMemoryId) {
+    return false;
+  }
+
+  const owner = normalizeMissingDetailMemoryOwner(ownerUserId);
+  const result = await query(
+    `DELETE FROM missing_detail_memory
+     WHERE memory_id = $1 AND owner_user_id = $2`,
+    [normalizedMemoryId, owner],
+  );
+
+  return (result.rowCount ?? 0) > 0;
 }

@@ -215,6 +215,20 @@ const METHOD_ALIASES: Record<string, string> = {
   sheets_append_rows: "sheets.appendRow",
   "sheets.write_cells": "sheets.updateCells",
   sheets_write_cells: "sheets.updateCells",
+  "spreadsheet.add_row": "sheets.addRow",
+  spreadsheet_add_row: "sheets.addRow",
+  "spreadsheet.append_row": "sheets.appendRow",
+  spreadsheet_append_row: "sheets.appendRow",
+  "spreadsheet.get_rows": "sheets.getRows",
+  spreadsheet_get_rows: "sheets.getRows",
+  "spreadsheet.read_range": "sheets.readRange",
+  spreadsheet_read_range: "sheets.readRange",
+  "spreadsheet.update_row": "sheets.updateRow",
+  spreadsheet_update_row: "sheets.updateRow",
+  "spreadsheet.delete_row": "sheets.deleteRow",
+  spreadsheet_delete_row: "sheets.deleteRow",
+  "spreadsheet.list_sheets": "sheets.listSheets",
+  spreadsheet_list_sheets: "sheets.listSheets",
   "gmail.list_messages": "gmail.listMessages",
   gmail_list_messages: "gmail.listMessages",
   "gmail.search_messages": "gmail.listMessages",
@@ -1532,7 +1546,7 @@ async function getGmailConfig(params: JsonRecord): Promise<GmailConfig> {
   const credentials = asRecord(integration.credentials);
 
   let accessToken = (
-    pickString(params, ["accessToken", "apiKey", "token"]) ||
+    pickString(params, ["accessToken", "apiKey"]) ||
     pickString(credentials, ["accessToken", "apiKey", "token"]) ||
     process.env.GMAIL_ACCESS_TOKEN ||
     ""
@@ -3864,10 +3878,45 @@ const handlers: Record<string, MCPHandler> = {
         }),
       );
       const headerRows = parseBodyAsList(headerRead.values);
-      const headers =
+      let headers =
         headerRows.length > 0 && Array.isArray(headerRows[0])
           ? (headerRows[0] as unknown[])
           : [];
+
+      const rowKeys = Object.keys(rowRecord);
+      const normalizedHeaderKeys = headers
+        .map((entry) => String(entry ?? "").trim())
+        .filter((entry) => entry.length > 0);
+
+      if (normalizedHeaderKeys.length === 0 && rowKeys.length > 0) {
+        await handlers["sheets.appendRow"]({
+          ...payload,
+          row_data: [rowKeys],
+          range: `${sheetName}!1:1`,
+        });
+        headers = [...rowKeys];
+      }
+
+      const currentHeaders = headers
+        .map((entry) => String(entry ?? "").trim())
+        .filter((entry) => entry.length > 0);
+
+      const missingHeaders = rowKeys.filter(
+        (key) => !currentHeaders.includes(key),
+      );
+
+      if (currentHeaders.length > 0 && missingHeaders.length > 0) {
+        const updatedHeaders = [...currentHeaders, ...missingHeaders];
+        const endColumn = toSheetColumnName(updatedHeaders.length);
+
+        await handlers["sheets.updateCells"]({
+          ...payload,
+          range: `${sheetName}!A1:${endColumn}1`,
+          values: [updatedHeaders],
+        });
+
+        headers = [...updatedHeaders];
+      }
 
       const mappedRow =
         headers.length > 0

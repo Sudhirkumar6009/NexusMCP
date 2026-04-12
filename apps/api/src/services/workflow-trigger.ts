@@ -4,6 +4,7 @@ import type {
   WorkflowTriggerResult,
 } from "../types/webhook.js";
 import { executeWebhookWorkflow } from "./webhook-workflow-executor.js";
+import { shouldSuppressWebhookEvent } from "./webhook-loop-guard.js";
 
 const AGENTIC_SERVICE_URL = (
   process.env.AGENTIC_SERVICE_URL ?? "http://localhost:8010"
@@ -273,6 +274,19 @@ function predefinedDagForWorkflow(
 export async function triggerWorkflow(
   event: NormalizedWebhookEvent,
 ): Promise<WorkflowTriggerResult> {
+  const suppression = shouldSuppressWebhookEvent(event);
+  if (suppression.suppress) {
+    console.info(
+      `[WebhookTrigger] suppressed source=${event.source} event=${event.event} reason=${suppression.reason ?? "potential loop"}`,
+    );
+
+    return {
+      accepted: false,
+      reason:
+        suppression.reason || "Suppressed potential webhook workflow loop",
+    };
+  }
+
   const workflow = resolveWorkflowBySource(event.source);
   if (!workflow) {
     console.info(

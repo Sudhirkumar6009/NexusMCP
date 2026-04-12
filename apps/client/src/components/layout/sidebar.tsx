@@ -8,6 +8,7 @@ import { useAuth } from "@/context";
 import { Button } from "@/components/ui/button";
 import { logsApi } from "@/lib/api";
 import {
+  Database,
   LayoutDashboard,
   History,
   LogOut,
@@ -29,6 +30,7 @@ const navItems: NavItem[] = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { label: "Workflows", href: "/workflows", icon: Workflow },
   { label: "Past Executions", href: "/past-executions", icon: History },
+  { label: "Saved Data", href: "/saved-data", icon: Database },
   { label: "Integrations", href: "/integrations", icon: Plug },
   { label: "Audit Logs", href: "/logs", icon: ScrollText },
   { label: "Profile", href: "/profile", icon: User },
