@@ -20,7 +20,10 @@ import authRoutes, {
   authenticateToken,
 } from "./routes/auth.js";
 import mcpRoutes from "./routes/mcp.js";
+import webhookRoutes from "./routes/webhooks.js";
 import { initPostgresStore } from "./services/postgres-store.js";
+import { startWebhookQueueWorker } from "./services/webhook-queue.js";
+import { getAlwaysOnWorkflowConfig } from "./services/workflow-trigger.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -53,6 +56,18 @@ app.use(
 );
 app.use(express.json());
 app.use(cookieParser());
+
+// Normalize accidental double slashes from external webhook URL joins.
+app.use((req, res, next) => {
+  const normalizedPath = req.path.replace(/\/{2,}/g, "/");
+  if (normalizedPath !== req.path) {
+    const query = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
+    return res.redirect(307, `${normalizedPath}${query}`);
+  }
+
+  next();
+});
+
 app.use(requestLogger);
 
 // Initialize Passport
@@ -66,6 +81,10 @@ if (process.env.NODE_ENV !== "production") {
 
 // Google OAuth routes (no /api prefix)
 app.use("/auth", googleAuthRoutes);
+
+// Public webhook endpoints for external event providers
+app.use("/webhook", webhookRoutes);
+app.use("/api/webhook", webhookRoutes);
 
 // API Routes
 app.use("/api/auth", authRoutes);
@@ -98,9 +117,16 @@ app.get("/health", (_req, res) => {
 
 // API documentation endpoint
 app.get("/api", (_req, res) => {
+  const workflowMode = getAlwaysOnWorkflowConfig();
+
   res.json({
     name: "NexusMCP API",
     version: "1.0.0",
+    webhookRuntime: {
+      alwaysOn: workflowMode.enabled,
+      plannerEnabled: workflowMode.plannerEnabled,
+      workflows: workflowMode.workflows,
+    },
     endpoints: {
       auth: {
         "POST /api/auth/register": "Register new user",
@@ -138,6 +164,16 @@ app.get("/api", (_req, res) => {
       mcp: {
         "POST /api/mcp/execute": "Execute MCP request",
         "GET /api/mcp/methods": "List available methods",
+      },
+      webhooks: {
+        "GET /api/webhook/github": "Webhook route health check",
+        "POST /api/webhook/github": "Receive GitHub webhook event",
+        "GET /api/webhook/slack": "Webhook route health check",
+        "POST /api/webhook/slack": "Receive Slack webhook event",
+        "POST /api/webhook/jira": "Receive Jira webhook event",
+        "POST /webhook/github": "Alias route for GitHub webhook event",
+        "POST /webhook/jira": "Alias route for Jira webhook event",
+        "POST /webhook/slack": "Alias route for Slack webhook event",
       },
     },
   });
@@ -185,6 +221,12 @@ async function startServer() {
         }`,
       );
     }
+
+    startWebhookQueueWorker();
+    const workflowMode = getAlwaysOnWorkflowConfig();
+    console.info(
+      `[WebhookTrigger] mode alwaysOn=${workflowMode.enabled} plannerEnabled=${workflowMode.plannerEnabled} workflows=${workflowMode.workflows.join(",")}`,
+    );
 
     const server = app.listen(PORT, () => {
       console.log(`

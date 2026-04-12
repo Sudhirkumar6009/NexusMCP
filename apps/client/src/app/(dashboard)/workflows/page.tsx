@@ -18,6 +18,7 @@ import {
   Clock3,
   Loader2,
   Search,
+  Trash2,
 } from "lucide-react";
 
 import { workflowsApi, type Workflow } from "@/lib/api";
@@ -45,6 +46,8 @@ type StatusVariant =
   | "warning"
   | "info"
   | "primary";
+
+type WorkflowView = "default" | "user";
 
 const WORKFLOW_PAGE_SIZE = 3;
 
@@ -255,18 +258,24 @@ function WorkflowGraph({ workflow }: WorkflowGraphProps) {
 export default function WorkflowsPage() {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [search, setSearch] = useState("");
+  const [workflowView, setWorkflowView] = useState<WorkflowView>("default");
   const [currentPage, setCurrentPage] = useState(1);
   const [totalWorkflows, setTotalWorkflows] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
+  const [deletingWorkflowId, setDeletingWorkflowId] = useState<string | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
 
   const loadWorkflows = useCallback(
     async ({
       page = 1,
       query = "",
+      scope = "default",
     }: {
       page?: number;
       query?: string;
+      scope?: WorkflowView;
     } = {}) => {
       setIsLoading(true);
 
@@ -277,6 +286,7 @@ export default function WorkflowsPage() {
         limit: WORKFLOW_PAGE_SIZE,
         offset,
         search: query || undefined,
+        scope,
       });
 
       if (!response.success || !response.data) {
@@ -317,19 +327,25 @@ export default function WorkflowsPage() {
       void loadWorkflows({
         page: 1,
         query: search.trim(),
+        scope: workflowView,
       });
     }, 300);
 
     return () => {
       window.clearTimeout(timer);
     };
-  }, [loadWorkflows, search]);
+  }, [loadWorkflows, search, workflowView]);
 
-  const totalPages = Math.max(1, Math.ceil(totalWorkflows / WORKFLOW_PAGE_SIZE));
+  const totalPages = Math.max(
+    1,
+    Math.ceil(totalWorkflows / WORKFLOW_PAGE_SIZE),
+  );
   const showingFrom =
     workflows.length === 0 ? 0 : (currentPage - 1) * WORKFLOW_PAGE_SIZE + 1;
   const showingTo =
-    workflows.length === 0 ? 0 : Math.min(showingFrom + workflows.length - 1, totalWorkflows);
+    workflows.length === 0
+      ? 0
+      : Math.min(showingFrom + workflows.length - 1, totalWorkflows);
 
   const goToPage = (nextPage: number) => {
     const normalizedPage = Math.min(Math.max(nextPage, 1), totalPages);
@@ -338,8 +354,62 @@ export default function WorkflowsPage() {
     }
 
     setCurrentPage(normalizedPage);
-    void loadWorkflows({ page: normalizedPage, query: search.trim() });
+    void loadWorkflows({
+      page: normalizedPage,
+      query: search.trim(),
+      scope: workflowView,
+    });
   };
+
+  const handleDeleteWorkflow = useCallback(
+    async (workflow: Workflow) => {
+      const confirmed = window.confirm(
+        `Delete workflow "${workflow.name}"? This action cannot be undone.`,
+      );
+
+      if (!confirmed) {
+        return;
+      }
+
+      setDeletingWorkflowId(workflow.id);
+      setError(null);
+
+      try {
+        const response = await workflowsApi.delete(workflow.id);
+        if (!response.success) {
+          setError(response.error || "Failed to delete workflow");
+          return;
+        }
+
+        const nextTotal = Math.max(totalWorkflows - 1, 0);
+        const nextPages = Math.max(
+          1,
+          Math.ceil(nextTotal / WORKFLOW_PAGE_SIZE),
+        );
+        const shouldStepBackPage = workflows.length === 1 && currentPage > 1;
+        const nextPage = shouldStepBackPage
+          ? currentPage - 1
+          : Math.min(currentPage, nextPages);
+
+        setCurrentPage(nextPage);
+        await loadWorkflows({
+          page: nextPage,
+          query: search.trim(),
+          scope: workflowView,
+        });
+      } finally {
+        setDeletingWorkflowId(null);
+      }
+    },
+    [
+      currentPage,
+      loadWorkflows,
+      search,
+      totalWorkflows,
+      workflowView,
+      workflows,
+    ],
+  );
 
   return (
     <div className="space-y-6">
@@ -348,17 +418,39 @@ export default function WorkflowsPage() {
           <div>
             <CardTitle>Workflows</CardTitle>
             <CardDescription>
-              Search generated workflow history from PostgreSQL with flow
-              visualization.
+              Toggle between default workflows and user-created workflows.
             </CardDescription>
           </div>
         </CardHeader>
         <CardContent>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="inline-flex items-center rounded-md border border-border bg-surface-secondary p-1">
+              <Button
+                size="sm"
+                variant={workflowView === "default" ? "primary" : "ghost"}
+                onClick={() => setWorkflowView("default")}
+                disabled={isLoading}
+              >
+                Default Workflows
+              </Button>
+              <Button
+                size="sm"
+                variant={workflowView === "user" ? "primary" : "ghost"}
+                onClick={() => setWorkflowView("user")}
+                disabled={isLoading}
+              >
+                Created by User
+              </Button>
+            </div>
+
             <Input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder="Search workflow by name or prompt"
+              placeholder={
+                workflowView === "default"
+                  ? "Search default workflows"
+                  : "Search user workflows by name or prompt"
+              }
               isSearch
               leftIcon={<Search className="h-4 w-4" />}
             />
@@ -368,6 +460,7 @@ export default function WorkflowsPage() {
                 void loadWorkflows({
                   page: currentPage,
                   query: search.trim(),
+                  scope: workflowView,
                 })
               }
               isLoading={isLoading}
@@ -401,7 +494,9 @@ export default function WorkflowsPage() {
       {!isLoading && workflows.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-content-secondary">
-            No workflows found for your search.
+            {workflowView === "default"
+              ? "No default workflows found for your search."
+              : "No user workflows found for your search."}
           </CardContent>
         </Card>
       ) : null}
@@ -424,6 +519,20 @@ export default function WorkflowsPage() {
                       </span>
                     </CardDescription>
                   </div>
+
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    leftIcon={<Trash2 className="h-4 w-4" />}
+                    isLoading={deletingWorkflowId === workflow.id}
+                    disabled={
+                      Boolean(deletingWorkflowId) &&
+                      deletingWorkflowId !== workflow.id
+                    }
+                    onClick={() => void handleDeleteWorkflow(workflow)}
+                  >
+                    Delete
+                  </Button>
                 </div>
               </CardHeader>
 

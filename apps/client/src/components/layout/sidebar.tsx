@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { logsApi } from "@/lib/api";
 import {
   LayoutDashboard,
+  History,
   LogOut,
   Plug,
   ScrollText,
@@ -27,6 +28,7 @@ interface NavItem {
 const navItems: NavItem[] = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { label: "Workflows", href: "/workflows", icon: Workflow },
+  { label: "Past Executions", href: "/past-executions", icon: History },
   { label: "Integrations", href: "/integrations", icon: Plug },
   { label: "Audit Logs", href: "/logs", icon: ScrollText },
   { label: "Profile", href: "/profile", icon: User },

@@ -292,7 +292,7 @@ export async function listWorkflowDefinitions(
   const whereClause = ownerUserId
     ? (() => {
         params.push(ownerUserId);
-        return `WHERE owner_user_id = $${params.length}`;
+        return `WHERE owner_user_id = $${params.length} OR owner_user_id IS NULL`;
       })()
     : "";
 
@@ -319,7 +319,7 @@ export async function getWorkflowDefinition(
   const ownerClause = ownerUserId
     ? (() => {
         params.push(ownerUserId);
-        return ` AND owner_user_id = $${params.length}`;
+        return ` AND (owner_user_id = $${params.length} OR owner_user_id IS NULL)`;
       })()
     : "";
 
@@ -349,7 +349,7 @@ export async function deleteWorkflowDefinition(
   const ownerClause = ownerUserId
     ? (() => {
         params.push(ownerUserId);
-        return ` AND owner_user_id = $${params.length}`;
+        return ` AND (owner_user_id = $${params.length} OR owner_user_id IS NULL)`;
       })()
     : "";
 

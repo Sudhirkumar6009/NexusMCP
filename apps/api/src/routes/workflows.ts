@@ -26,6 +26,29 @@ type AuthenticatedRequest = {
 type WorkflowNodeType = Workflow["nodes"][number]["type"];
 type WorkflowNodeService = Workflow["nodes"][number]["service"];
 
+type WorkflowListScope = "all" | "default" | "user";
+
+const DEFAULT_WORKFLOW_IDS = new Set([
+  "GITHUB_START_WORKFLOW",
+  "JIRA_START_WORKFLOW",
+  "SLACK_START_WORKFLOW",
+  "wf-webhook-github-default",
+  "wf-webhook-jira-default",
+  "wf-webhook-slack-default",
+]);
+
+const DEFAULT_WORKFLOW_SOURCES = new Set([
+  "webhook-github-default",
+  "webhook-jira-default",
+  "webhook-slack-default",
+]);
+
+const DEFAULT_ROUTED_WORKFLOWS = new Set([
+  "GITHUB_START_WORKFLOW",
+  "JIRA_START_WORKFLOW",
+  "SLACK_START_WORKFLOW",
+]);
+
 function getRequestUserId(req: unknown): string | undefined {
   const request = req as AuthenticatedRequest;
   return typeof request.userId === "string" ? request.userId : undefined;
@@ -37,6 +60,44 @@ function asRecord(value: unknown): Record<string, unknown> {
   }
 
   return value as Record<string, unknown>;
+}
+
+function parseWorkflowListScope(value: unknown): WorkflowListScope {
+  if (typeof value !== "string") {
+    return "all";
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "default") return "default";
+  if (normalized === "user") return "user";
+  return "all";
+}
+
+function isDefaultWorkflow(workflow: Workflow): boolean {
+  if (DEFAULT_WORKFLOW_IDS.has(workflow.id)) {
+    return true;
+  }
+
+  const generatedJson = asRecord(workflow.generatedJson);
+  const sourceRaw = generatedJson.source;
+  const source =
+    typeof sourceRaw === "string" ? sourceRaw.trim().toLowerCase() : "";
+
+  if (source && DEFAULT_WORKFLOW_SOURCES.has(source)) {
+    return true;
+  }
+
+  const routedWorkflowRaw = generatedJson.workflow;
+  const routedWorkflow =
+    typeof routedWorkflowRaw === "string"
+      ? routedWorkflowRaw.trim().toUpperCase()
+      : "";
+
+  if (routedWorkflow && DEFAULT_ROUTED_WORKFLOWS.has(routedWorkflow)) {
+    return true;
+  }
+
+  return false;
 }
 
 function normalizeNodeService(value?: string): WorkflowNodeService {
@@ -330,6 +391,7 @@ function sanitizeAgenticTools(
 // GET /api/workflows - List current user's workflows
 router.get("/", async (req, res) => {
   const userId = getRequestUserId(req);
+  const scope = parseWorkflowListScope(req.query.scope);
 
   const limitRaw = Number(req.query.limit);
   const limit = Number.isFinite(limitRaw)
@@ -347,13 +409,20 @@ router.get("/", async (req, res) => {
     ? await listWorkflowDefinitions(userId)
     : dataStore.getWorkflows();
 
+  const scoped =
+    scope === "default"
+      ? workflows.filter((workflow) => isDefaultWorkflow(workflow))
+      : scope === "user"
+        ? workflows.filter((workflow) => !isDefaultWorkflow(workflow))
+        : workflows;
+
   const filtered = query
-    ? workflows.filter(
+    ? scoped.filter(
         (workflow) =>
           workflow.name.toLowerCase().includes(query) ||
           workflow.description.toLowerCase().includes(query),
       )
-    : workflows;
+    : scoped;
 
   const total = filtered.length;
   const paged =
@@ -368,8 +437,7 @@ router.get("/", async (req, res) => {
       total,
       limit: limit ?? total,
       offset,
-      hasMore:
-        typeof limit === "number" ? offset + limit < total : false,
+      hasMore: typeof limit === "number" ? offset + limit < total : false,
     },
   });
 });
@@ -1089,7 +1157,9 @@ router.post("/agentic-flow", async (req, res) => {
 // POST /api/workflows/event-orchestrator - Deterministic event workflow mapping
 router.post("/event-orchestrator", async (req, res) => {
   const event =
-    req.body?.event && typeof req.body.event === "object" && !Array.isArray(req.body.event)
+    req.body?.event &&
+    typeof req.body.event === "object" &&
+    !Array.isArray(req.body.event)
       ? (req.body.event as Record<string, unknown>)
       : req.body && typeof req.body === "object" && !Array.isArray(req.body)
         ? (req.body as Record<string, unknown>)
@@ -1119,14 +1189,17 @@ router.post("/event-orchestrator", async (req, res) => {
   );
 
   try {
-    const upstream = await fetch(`${AGENTIC_SERVICE_URL}/agentic/event-workflow`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
+    const upstream = await fetch(
+      `${AGENTIC_SERVICE_URL}/agentic/event-workflow`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ event }),
+        signal: controller.signal,
       },
-      body: JSON.stringify({ event }),
-      signal: controller.signal,
-    });
+    );
 
     const contentType = upstream.headers.get("content-type") ?? "";
     const payload = contentType.includes("application/json")

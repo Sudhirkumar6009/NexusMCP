@@ -100,11 +100,19 @@ async function fetchApi<T>(
 
 // Workflows API
 export const workflowsApi = {
-  list: (options?: { limit?: number; offset?: number; search?: string }) => {
+  list: (options?: {
+    limit?: number;
+    offset?: number;
+    search?: string;
+    scope?: "all" | "default" | "user";
+  }) => {
     const params = new URLSearchParams();
     if (options?.limit) params.set("limit", String(options.limit));
     if (options?.offset) params.set("offset", String(options.offset));
     if (options?.search) params.set("search", options.search);
+    if (options?.scope && options.scope !== "all") {
+      params.set("scope", options.scope);
+    }
 
     const query = params.toString();
     return fetchApi<Workflow[]>(`/workflows${query ? `?${query}` : ""}`);

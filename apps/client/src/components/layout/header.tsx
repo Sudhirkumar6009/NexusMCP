@@ -7,6 +7,7 @@ import { ThemeToggle } from "./theme-toggle";
 const pageTitles: Record<string, string> = {
   "/dashboard": "Dashboard",
   "/integrations": "Integrations Hub",
+  "/past-executions": "Past Executions",
   "/logs": "Audit Logs",
   "/settings": "Global Settings",
   "/profile": "User Profile",
