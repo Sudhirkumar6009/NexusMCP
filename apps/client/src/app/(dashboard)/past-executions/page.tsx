@@ -924,8 +924,8 @@ export default function PastExecutionsPage() {
       ) : null}
 
       {!isLoading && filteredExecutions.length > 0 && selectedExecution ? (
-        <div className="grid gap-6 xl:grid-cols-[380px,1fr]">
-          <Card className="h-fit">
+        <div className="grid gap-4 xl:h-[calc(100vh-15rem)] xl:grid-cols-[340px,1fr]">
+          <Card className="h-fit xl:sticky xl:top-4 xl:h-[calc(100vh-15rem)]">
             <CardHeader>
               <div>
                 <CardTitle className="text-base">Execution Runs</CardTitle>
@@ -936,7 +936,7 @@ export default function PastExecutionsPage() {
             </CardHeader>
 
             <CardContent>
-              <div className="max-h-[70vh] space-y-2 overflow-auto pr-1">
+              <div className="max-h-[65vh] space-y-2 overflow-auto pr-1 xl:max-h-[calc(100vh-21rem)]">
                 {filteredExecutions.map((execution) => {
                   const isSelected =
                     execution.executionId === selectedExecution.executionId;
@@ -984,7 +984,7 @@ export default function PastExecutionsPage() {
             </CardContent>
           </Card>
 
-          <div className="space-y-6">
+          <div className="space-y-4 overflow-hidden xl:h-[calc(100vh-15rem)] xl:overflow-y-auto xl:pr-1">
             <div className="grid gap-3 md:grid-cols-4">
               <Card>
                 <CardContent className="py-4">
@@ -1025,71 +1025,73 @@ export default function PastExecutionsPage() {
               </Card>
             </div>
 
-            <Card>
-              <CardHeader>
-                <div>
-                  <CardTitle className="text-base">Trigger Info</CardTitle>
-                  <CardDescription>
-                    Source event details captured for this execution.
-                  </CardDescription>
-                </div>
-              </CardHeader>
+            <div className="grid gap-4 xl:grid-cols-2">
+              <Card>
+                <CardHeader>
+                  <div>
+                    <CardTitle className="text-base">Trigger Info</CardTitle>
+                    <CardDescription>
+                      Source event details captured for this execution.
+                    </CardDescription>
+                  </div>
+                </CardHeader>
 
-              <CardContent className="space-y-3">
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div className="rounded-md border border-border bg-surface-secondary p-3">
-                    <p className="text-xs text-content-secondary">Source</p>
-                    <p className="mt-1 text-sm font-medium text-content-primary">
-                      {selectedExecution.triggerInfo.source || "N/A"}
-                    </p>
+                <CardContent className="space-y-3">
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="rounded-md border border-border bg-surface-secondary p-3">
+                      <p className="text-xs text-content-secondary">Source</p>
+                      <p className="mt-1 text-sm font-medium text-content-primary">
+                        {selectedExecution.triggerInfo.source || "N/A"}
+                      </p>
+                    </div>
+                    <div className="rounded-md border border-border bg-surface-secondary p-3">
+                      <p className="text-xs text-content-secondary">Event</p>
+                      <p className="mt-1 text-sm font-medium text-content-primary">
+                        {selectedExecution.triggerInfo.event || "N/A"}
+                      </p>
+                    </div>
+                    <div className="rounded-md border border-border bg-surface-secondary p-3">
+                      <p className="text-xs text-content-secondary">Trigger</p>
+                      <p className="mt-1 text-sm font-medium text-content-primary">
+                        {selectedExecution.triggerInfo.trigger || "N/A"}
+                      </p>
+                    </div>
+                    <div className="rounded-md border border-border bg-surface-secondary p-3">
+                      <p className="text-xs text-content-secondary">Repository</p>
+                      <p className="mt-1 text-sm font-medium text-content-primary">
+                        {selectedExecution.triggerInfo.repository || "N/A"}
+                      </p>
+                    </div>
                   </div>
-                  <div className="rounded-md border border-border bg-surface-secondary p-3">
-                    <p className="text-xs text-content-secondary">Event</p>
-                    <p className="mt-1 text-sm font-medium text-content-primary">
-                      {selectedExecution.triggerInfo.event || "N/A"}
-                    </p>
-                  </div>
-                  <div className="rounded-md border border-border bg-surface-secondary p-3">
-                    <p className="text-xs text-content-secondary">Trigger</p>
-                    <p className="mt-1 text-sm font-medium text-content-primary">
-                      {selectedExecution.triggerInfo.trigger || "N/A"}
-                    </p>
-                  </div>
-                  <div className="rounded-md border border-border bg-surface-secondary p-3">
-                    <p className="text-xs text-content-secondary">Repository</p>
-                    <p className="mt-1 text-sm font-medium text-content-primary">
-                      {selectedExecution.triggerInfo.repository || "N/A"}
-                    </p>
-                  </div>
-                </div>
 
-                <div>
-                  <p className="mb-2 text-sm font-medium text-content-primary">
-                    Trigger Payload JSON
-                  </p>
-                  <pre className="max-h-64 overflow-auto rounded-md border border-border bg-surface-secondary p-3 text-xs text-content-primary">
-                    {JSON.stringify(selectedExecution.triggerPayload, null, 2)}
+                  <details className="rounded-md border border-border bg-surface-secondary p-3" open>
+                    <summary className="cursor-pointer text-sm font-medium text-content-primary">
+                      Trigger Payload JSON
+                    </summary>
+                    <pre className="mt-2 max-h-44 overflow-auto text-xs text-content-primary">
+                      {JSON.stringify(selectedExecution.triggerPayload, null, 2)}
+                    </pre>
+                  </details>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <div>
+                    <CardTitle className="text-base">Execution JSON</CardTitle>
+                    <CardDescription>
+                      Full run snapshot with step inputs and outputs.
+                    </CardDescription>
+                  </div>
+                </CardHeader>
+
+                <CardContent>
+                  <pre className="max-h-[22rem] overflow-auto rounded-md border border-border bg-surface-secondary p-3 text-xs text-content-primary">
+                    {executionJson}
                   </pre>
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <div>
-                  <CardTitle className="text-base">Execution JSON</CardTitle>
-                  <CardDescription>
-                    Full run snapshot with step inputs and outputs.
-                  </CardDescription>
-                </div>
-              </CardHeader>
-
-              <CardContent>
-                <pre className="max-h-80 overflow-auto rounded-md border border-border bg-surface-secondary p-3 text-xs text-content-primary">
-                  {executionJson}
-                </pre>
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
+            </div>
 
             <Card>
               <CardHeader>
@@ -1156,7 +1158,7 @@ export default function PastExecutionsPage() {
                       No error-level audit logs for this execution.
                     </p>
                   ) : (
-                    <div className="space-y-2">
+                    <div className="max-h-56 space-y-2 overflow-auto pr-1">
                       {selectedErrorLogs.map((log) => (
                         <div
                           key={log.id}
@@ -1186,7 +1188,7 @@ export default function PastExecutionsPage() {
                       No failed steps for this execution.
                     </p>
                   ) : (
-                    <div className="space-y-2">
+                    <div className="max-h-64 space-y-2 overflow-auto pr-1">
                       {selectedFailedSteps.map((step) => (
                         <div
                           key={step.stepId}
@@ -1219,7 +1221,7 @@ export default function PastExecutionsPage() {
                 </div>
               </CardHeader>
 
-              <CardContent>
+              <CardContent className="max-h-[28rem] overflow-auto">
                 <Table>
                   <TableHeader>
                     <TableRow>
