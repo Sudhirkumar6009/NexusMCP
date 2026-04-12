@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   Clock3,
@@ -572,6 +572,7 @@ export default function PastExecutionsPage() {
   const [retryError, setRetryError] = useState<string | null>(null);
   const [retryInfo, setRetryInfo] = useState<string | null>(null);
   const [isRetrying, setIsRetrying] = useState(false);
+  const autoRetriedExecutionIdsRef = useRef<Set<string>>(new Set());
 
   const loadData = useCallback(async () => {
     setIsRefreshing(true);
@@ -801,6 +802,60 @@ export default function PastExecutionsPage() {
     }));
   }, []);
 
+  const startMissingDetailsRetry = useCallback(
+    (args: {
+      executionId: string;
+      payload: Record<string, string>;
+      autoTriggered?: boolean;
+    }) => {
+      if (isRetrying) {
+        return;
+      }
+
+      // Close immediately so rerun happens in background without blocking the user.
+      setIsMissingDetailsModalOpen(false);
+      setIsRetrying(true);
+      setRetryError(null);
+      setRetryInfo(
+        args.autoTriggered
+          ? "Saved details found in memory. Re-run started automatically in background."
+          : "Re-run started in background. You can continue working.",
+      );
+
+      const selectedExecutionIdForRetry = args.executionId;
+      void (async () => {
+        try {
+          const response = await workflowsApi.retryMissingDetails(
+            selectedExecutionIdForRetry,
+            args.payload,
+          );
+
+          if (!response.success || !response.data) {
+            setRetryInfo(null);
+            setRetryError(response.error || "Failed to retry execution.");
+
+            if (args.autoTriggered) {
+              autoRetriedExecutionIdsRef.current.delete(
+                selectedExecutionIdForRetry,
+              );
+            }
+
+            return;
+          }
+
+          setRetryInfo(
+            `Background re-run queued as execution ${response.data.executionId}.`,
+          );
+          await loadData();
+          setSelectedExecutionId(response.data.executionId);
+        } finally {
+          setIsRetrying(false);
+        }
+      })();
+    },
+    [isRetrying, loadData],
+  );
+
   const submitMissingDetailsRetry = useCallback(() => {
     if (isRetrying) {
       return;
@@ -831,41 +886,60 @@ export default function PastExecutionsPage() {
       return;
     }
 
-    // Close immediately so rerun happens in background without blocking the user.
-    setIsMissingDetailsModalOpen(false);
-    setIsRetrying(true);
-    setRetryError(null);
-    setRetryInfo("Re-run started in background. You can continue working.");
-
-    const selectedExecutionIdForRetry = selectedExecution.executionId;
-    void (async () => {
-      try {
-        const response = await workflowsApi.retryMissingDetails(
-          selectedExecutionIdForRetry,
-          payload,
-        );
-
-        if (!response.success || !response.data) {
-          setRetryInfo(null);
-          setRetryError(response.error || "Failed to retry execution.");
-          return;
-        }
-
-        setRetryInfo(
-          `Background re-run queued as execution ${response.data.executionId}.`,
-        );
-        await loadData();
-        setSelectedExecutionId(response.data.executionId);
-      } finally {
-        setIsRetrying(false);
-      }
-    })();
+    startMissingDetailsRetry({
+      executionId: selectedExecution.executionId,
+      payload,
+    });
   }, [
     isRetrying,
-    loadData,
     missingDetailPrompts,
     missingDetailValues,
     selectedExecution,
+    startMissingDetailsRetry,
+  ]);
+
+  useEffect(() => {
+    if (!selectedExecution || isRetrying || missingDetailPrompts.length === 0) {
+      return;
+    }
+
+    const requiredKeys = missingDetailPrompts.map((prompt) => prompt.key);
+    const prefilledSet = new Set(prefilledMissingKeys);
+    const payload: Record<string, string> = {};
+
+    for (const key of requiredKeys) {
+      const value = (missingDetailValues[key] || "").trim();
+      if (value) {
+        payload[key] = value;
+      }
+    }
+
+    const hasAllSavedValues = requiredKeys.every(
+      (key) => prefilledSet.has(key) && Boolean(payload[key]),
+    );
+
+    if (!hasAllSavedValues) {
+      return;
+    }
+
+    const executionId = selectedExecution.executionId;
+    if (autoRetriedExecutionIdsRef.current.has(executionId)) {
+      return;
+    }
+
+    autoRetriedExecutionIdsRef.current.add(executionId);
+    startMissingDetailsRetry({
+      executionId,
+      payload,
+      autoTriggered: true,
+    });
+  }, [
+    isRetrying,
+    missingDetailPrompts,
+    missingDetailValues,
+    prefilledMissingKeys,
+    selectedExecution,
+    startMissingDetailsRetry,
   ]);
 
   const executionJson = useMemo(() => {

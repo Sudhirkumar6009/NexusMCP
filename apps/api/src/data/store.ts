@@ -760,6 +760,28 @@ class DataStore {
     });
     return updated;
   }
+
+  deleteExecutionArtifacts(executionId: string): boolean {
+    const normalizedExecutionId = executionId.trim();
+    if (!normalizedExecutionId) {
+      return false;
+    }
+
+    const existingExecution = this.executions.get(normalizedExecutionId);
+    this.executions.delete(normalizedExecutionId);
+
+    this.logs = this.logs.filter(
+      (log) => log.executionId !== normalizedExecutionId,
+    );
+
+    for (const workflow of this.workflows.values()) {
+      workflow.executionHistory = workflow.executionHistory.filter(
+        (execution) => execution.id !== normalizedExecutionId,
+      );
+    }
+
+    return Boolean(existingExecution);
+  }
 }
 
 // Export singleton instance

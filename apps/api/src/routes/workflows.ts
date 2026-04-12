@@ -2,6 +2,7 @@ import { Router } from "express";
 import { dataStore } from "../data/store.js";
 import type { Workflow } from "../types/index.js";
 import {
+  deleteWorkflowExecutionArtifacts,
   deleteMissingDetailMemory,
   deleteWorkflowDefinition,
   getEventLogs,
@@ -1514,12 +1515,34 @@ router.post(
       event: retryEvent,
       missingDetails,
       retryOfExecutionId: executionId,
+      previousStepRuns: stepRunResult.rows,
     });
 
     if (!retriedExecution) {
       return res.status(500).json({
         success: false,
         error: "Failed to start retry execution",
+      });
+    }
+
+    const deletedPreviousExecution = await deleteWorkflowExecutionArtifacts(
+      executionId,
+      userId,
+    );
+    dataStore.deleteExecutionArtifacts(executionId);
+
+    if (!deletedPreviousExecution) {
+      dataStore.addLog({
+        level: "warning",
+        service: "system",
+        action: "workflow_retry_previous_execution_delete_skipped",
+        message: `Retry started but previous execution ${executionId} was not deleted`,
+        workflowId: retriedExecution.workflowId,
+        executionId: retriedExecution.executionId,
+        userId,
+        details: {
+          previousExecutionId: executionId,
+        },
       });
     }
 

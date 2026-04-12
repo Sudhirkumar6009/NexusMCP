@@ -62,9 +62,22 @@ type ExecutionResult = {
 
 type MissingDetailsPayload = Record<string, string>;
 
+type RetryStepRunSnapshot = {
+  stepId?: string;
+  toolName?: string;
+  status?: string;
+  outputPayload?: unknown;
+};
+
+type RetryReuseState = {
+  completedStepIds: Set<string>;
+  outputByStepId: Map<string, Record<string, unknown>>;
+};
+
 type GithubWorkflowExecutionOptions = {
   missingDetails?: Record<string, unknown>;
   retryOfExecutionId?: string;
+  previousStepRuns?: RetryStepRunSnapshot[];
 };
 
 const GITHUB_DEFAULT_WORKFLOW_ID = "wf-webhook-github-default";
@@ -94,6 +107,79 @@ function asString(value: unknown): string {
   }
 
   return "";
+}
+
+function isSuccessfulStepStatus(status: string): boolean {
+  const normalized = status.trim().toLowerCase();
+  return normalized === "success" || normalized === "completed";
+}
+
+function resolveStepPlanIdFromRun(args: {
+  stepPlan: WorkflowStepPlan[];
+  run: RetryStepRunSnapshot;
+}): string | null {
+  const knownStepIds = new Set(args.stepPlan.map((step) => step.id));
+
+  const rawStepId = asString(args.run.stepId);
+  if (rawStepId) {
+    const suffix = rawStepId.includes(":")
+      ? rawStepId.slice(rawStepId.lastIndexOf(":") + 1)
+      : rawStepId;
+
+    if (knownStepIds.has(suffix)) {
+      return suffix;
+    }
+  }
+
+  const method = asString(args.run.toolName).toLowerCase();
+  if (!method) {
+    return null;
+  }
+
+  const matchedStep = args.stepPlan.find(
+    (step) => step.method.toLowerCase() === method,
+  );
+
+  return matchedStep?.id ?? null;
+}
+
+function buildRetryReuseState(args: {
+  stepPlan: WorkflowStepPlan[];
+  previousStepRuns?: RetryStepRunSnapshot[];
+}): RetryReuseState {
+  const completedStepIds = new Set<string>();
+  const outputByStepId = new Map<string, Record<string, unknown>>();
+
+  const latestByStepId = new Map<
+    string,
+    { status: string; output: Record<string, unknown> }
+  >();
+
+  for (const run of args.previousStepRuns || []) {
+    const stepId = resolveStepPlanIdFromRun({ stepPlan: args.stepPlan, run });
+    if (!stepId || latestByStepId.has(stepId)) {
+      continue;
+    }
+
+    latestByStepId.set(stepId, {
+      status: asString(run.status),
+      output: asRecord(run.outputPayload),
+    });
+  }
+
+  for (const [stepId, row] of latestByStepId.entries()) {
+    if (!isSuccessfulStepStatus(row.status)) {
+      continue;
+    }
+
+    completedStepIds.add(stepId);
+    outputByStepId.set(stepId, row.output);
+  }
+
+  return {
+    completedStepIds,
+    outputByStepId,
+  };
 }
 
 function normalizeMissingDetailKey(rawKey: string): string {
@@ -372,6 +458,16 @@ function buildWebhookEmailDetails(args: {
   return lines.join("\n");
 }
 
+function extractIssueKeyFromOutput(
+  outputPayload: Record<string, unknown>,
+): string {
+  return (
+    asString(outputPayload.issueKey) ||
+    asString(outputPayload.issue_key) ||
+    asString(outputPayload.key)
+  );
+}
+
 function buildGithubWorkflowGraph(context: GithubExecutionContext): {
   nodes: Workflow["nodes"];
   edges: Workflow["edges"];
@@ -642,6 +738,11 @@ async function executeGithubDefaultWorkflow(
   const { nodes: initialNodes, edges } = buildGithubWorkflowGraph(context);
   let nodes = initialNodes;
   const description = buildGithubWorkflowDescription(context);
+  const stepPlan = buildGithubStepPlan();
+  const retryReuseState = buildRetryReuseState({
+    stepPlan,
+    previousStepRuns: options?.previousStepRuns,
+  });
 
   const usePostgres = isPostgresReady();
   const startedAt = nowIso();
@@ -722,7 +823,7 @@ async function executeGithubDefaultWorkflow(
   const stepResults: WebhookStepResult[] = [];
   let hasFailures = false;
 
-  for (const step of buildGithubStepPlan()) {
+  for (const step of stepPlan) {
     const stepId = `${executionId}:${step.id}`;
     const baseInputPayload = {
       ...step.buildInput(context),
@@ -731,6 +832,82 @@ async function executeGithubDefaultWorkflow(
       stepId,
       trigger: event.event,
     };
+
+    const shouldReuseCompletedStep =
+      Boolean(options?.retryOfExecutionId) &&
+      retryReuseState.completedStepIds.has(step.id);
+
+    if (shouldReuseCompletedStep) {
+      const reusedOutput = {
+        ...asRecord(retryReuseState.outputByStepId.get(step.id)),
+        _reusedFromExecutionId: options?.retryOfExecutionId,
+        _skippedOnRetry: true,
+      };
+
+      if (step.id === "jira-create") {
+        const issueKey = extractIssueKeyFromOutput(reusedOutput);
+        if (issueKey) {
+          context.issueKey = issueKey;
+        }
+      }
+
+      if (usePostgres) {
+        await saveStepRun({
+          stepId,
+          executionId,
+          toolName: step.method,
+          inputPayload: baseInputPayload,
+          outputPayload: reusedOutput,
+          status: "success",
+          retryCount: 1,
+        });
+      }
+
+      nodes = setNodeStatus(nodes, step.nodeId, "completed", {
+        result: reusedOutput,
+      });
+
+      await persistWorkflowSnapshot({
+        usePostgres,
+        workflowId,
+        ownerUserId: GITHUB_DEFAULT_WORKFLOW_OWNER,
+        name: GITHUB_DEFAULT_WORKFLOW_NAME,
+        description,
+        nodes,
+        edges,
+        status: "running",
+        createdAt: workflowCreatedAt,
+        updatedAt: nowIso(),
+        triggerEvent: event.event,
+      });
+
+      dataStore.addLog({
+        level: "info",
+        service: toAuditService(step.service),
+        action: "mcp_execute_node_reused",
+        message: `${step.label} reused from previous execution`,
+        workflowId,
+        executionId,
+        nodeId: step.nodeId,
+        details: {
+          method: step.method,
+          reusedFromExecutionId: options?.retryOfExecutionId,
+          output: reusedOutput,
+          missingDetailKeys,
+        },
+      });
+
+      stepResults.push({
+        id: step.id,
+        nodeId: step.nodeId,
+        method: step.method,
+        status: "success",
+        output: reusedOutput,
+      });
+
+      continue;
+    }
+
     const inputPayload = applyMissingDetailsToPayload({
       method: step.method,
       payload: baseInputPayload,
@@ -805,10 +982,7 @@ async function executeGithubDefaultWorkflow(
     const success = !response.error;
 
     if (success && step.id === "jira-create") {
-      const issueKey =
-        asString(outputPayload.issueKey) ||
-        asString(outputPayload.issue_key) ||
-        asString(outputPayload.key);
+      const issueKey = extractIssueKeyFromOutput(outputPayload);
 
       if (issueKey) {
         context.issueKey = issueKey;
@@ -964,6 +1138,7 @@ export async function executeWebhookWorkflow(args: {
   event: NormalizedWebhookEvent;
   missingDetails?: Record<string, unknown>;
   retryOfExecutionId?: string;
+  previousStepRuns?: RetryStepRunSnapshot[];
 }): Promise<ExecutionResult | null> {
   if (args.workflow !== "GITHUB_START_WORKFLOW") {
     return null;
@@ -972,5 +1147,6 @@ export async function executeWebhookWorkflow(args: {
   return executeGithubDefaultWorkflow(args.event, {
     missingDetails: args.missingDetails,
     retryOfExecutionId: args.retryOfExecutionId,
+    previousStepRuns: args.previousStepRuns,
   });
 }

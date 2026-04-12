@@ -437,6 +437,44 @@ export async function saveWorkflowExecution(
   );
 }
 
+export async function deleteWorkflowExecutionArtifacts(
+  executionId: string,
+  ownerUserId?: string,
+): Promise<boolean> {
+  if (!postgresReady) return false;
+
+  const normalizedExecutionId = executionId.trim();
+  if (!normalizedExecutionId) {
+    return false;
+  }
+
+  const owner = (ownerUserId || "").trim() || null;
+  const accessCheck = await query(
+    `SELECT e.execution_id
+     FROM workflow_executions e
+     LEFT JOIN workflow_definitions w ON w.workflow_id = e.workflow_id
+     WHERE e.execution_id = $1
+       AND ($2::text IS NULL OR w.owner_user_id = $2 OR w.owner_user_id IS NULL)
+     LIMIT 1`,
+    [normalizedExecutionId, owner],
+  );
+
+  if (accessCheck.rows.length === 0) {
+    return false;
+  }
+
+  await query(`DELETE FROM event_logs WHERE execution_id = $1`, [
+    normalizedExecutionId,
+  ]);
+
+  const deletedExecution = await query(
+    `DELETE FROM workflow_executions WHERE execution_id = $1`,
+    [normalizedExecutionId],
+  );
+
+  return (deletedExecution.rowCount ?? 0) > 0;
+}
+
 export async function saveStepRun(args: {
   stepId: string;
   executionId?: string;
