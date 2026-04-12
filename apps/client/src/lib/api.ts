@@ -243,6 +243,47 @@ export const logsApi = {
     return fetchApi<AuditLog[]>(`/logs${query ? `?${query}` : ""}`);
   },
 
+  listAll: async (
+    filters?: Omit<LogFilters, "limit" | "offset">,
+  ): Promise<ApiResponse<AuditLog[]>> => {
+    const pageSize = 1000;
+    let offset = 0;
+    const allLogs: AuditLog[] = [];
+
+    for (let page = 0; page < 100; page += 1) {
+      const response = await logsApi.list({
+        ...filters,
+        limit: pageSize,
+        offset,
+      });
+
+      if (!response.success) {
+        return response;
+      }
+
+      const pageData = Array.isArray(response.data) ? response.data : [];
+      allLogs.push(...pageData);
+
+      const pagination = (response as unknown as { pagination?: { total?: number } }).pagination;
+      const total = pagination?.total;
+
+      if (!Number.isFinite(total) || allLogs.length >= (total as number)) {
+        break;
+      }
+
+      if (pageData.length === 0) {
+        break;
+      }
+
+      offset += pageSize;
+    }
+
+    return {
+      success: true,
+      data: allLogs,
+    };
+  },
+
   listStepRuns: (filters?: StepRunFilters) => {
     const params = new URLSearchParams();
     if (filters?.executionId) params.set("executionId", filters.executionId);
